@@ -1,0 +1,1145 @@
+import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import {
+  View, Text, ScrollView, TouchableOpacity, StyleSheet,
+  FlatList, Modal, TextInput, ActivityIndicator, Dimensions,
+} from 'react-native';
+import { Image } from 'expo-image';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { MaterialIcons } from '@expo/vector-icons';
+import * as ImagePicker from 'expo-image-picker';
+import * as Print from 'expo-print';
+import * as Sharing from 'expo-sharing';
+import { getSupabaseClient } from '@/template';
+import { usePOS } from '@/hooks/usePOS';
+import { useAuth } from '@/hooks/useAuth';
+import { useBranch } from '@/hooks/useBranch';
+import { useAlert } from '@/template';
+import { Colors, Typography, Spacing, BorderRadius, Shadows } from '@/constants/theme';
+
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const isDesktop = SCREEN_WIDTH >= 1024;
+const isTablet = SCREEN_WIDTH >= 768;
+const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+interface Rider {
+  id: string;
+  name: string;
+  phone: string;
+  pin: string;
+  status: 'active' | 'inactive';
+  created_at: string;
+}
+
+interface RiderDelivery {
+  id: string;
+  order_id: string;
+  rider_id: string;
+  rider_name: string;
+  rider_phone: string;
+  status: DeliveryStatus;
+  assigned_at: string;
+  accepted_at?: string;
+  picked_up_at?: string;
+  delivered_at?: string;
+  failed_at?: string;
+  fail_reason?: string;
+  delivery_photo_url?: string;
+  delivery_otp?: string;
+  otp_verified: boolean;
+  notes?: string;
+  // Joined order info
+  order_no?: string;
+  customer_name?: string;
+  customer_phone?: string;
+  customer_address?: string;
+  total?: number;
+}
+
+interface RiderEarning {
+  id: string;
+  rider_id: string;
+  rider_name: string;
+  amount: number;
+  type: 'delivery_fee' | 'bonus' | 'deduction';
+  description: string;
+  period_month: string;
+  created_at: string;
+}
+
+type DeliveryStatus = 'assigned' | 'accepted' | 'picked_up' | 'in_transit' | 'delivered' | 'failed';
+type TabMode = 'deliveries' | 'riders' | 'earnings';
+
+const STATUS_CONFIG: Record<DeliveryStatus, { label: string; color: string; icon: string }> = {
+  assigned:   { label: 'Assigned',    color: Colors.skyBlue,   icon: 'assignment-ind' },
+  accepted:   { label: 'Accepted',    color: '#9B59B6',         icon: 'check-circle' },
+  picked_up:  { label: 'Picked Up',   color: Colors.warning,   icon: 'shopping-bag' },
+  in_transit: { label: 'In Transit',  color: Colors.gold,      icon: 'local-shipping' },
+  delivered:  { label: 'Delivered',   color: Colors.success,   icon: 'done-all' },
+  failed:     { label: 'Failed',      color: Colors.danger,    icon: 'cancel' },
+};
+
+const NEXT_STATUS: Record<DeliveryStatus, DeliveryStatus | null> = {
+  assigned:   'accepted',
+  accepted:   'picked_up',
+  picked_up:  'in_transit',
+  in_transit: 'delivered',
+  delivered:  null,
+  failed:     null,
+};
+
+export default function RidersScreen() {
+  const insets = useSafeAreaInsets();
+  const { user, hasPermission } = useAuth();
+  const { currentBranch } = useBranch();
+  const { orders } = usePOS();
+  const { showAlert } = useAlert();
+
+  const [tabMode, setTabMode] = useState<TabMode>('deliveries');
+  const [riders, setRiders] = useState<Rider[]>([]);
+  const [deliveries, setDeliveries] = useState<RiderDelivery[]>([]);
+  const [earnings, setEarnings] = useState<RiderEarning[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Filter/search
+  const [statusFilter, setStatusFilter] = useState<DeliveryStatus | 'all'>('all');
+  const [riderFilter, setRiderFilter] = useState('all');
+  const [searchRider, setSearchRider] = useState('');
+  const [earningsMonth, setEarningsMonth] = useState(new Date().toISOString().slice(0, 7));
+
+  // Modals
+  const [showRiderModal, setShowRiderModal] = useState(false);
+  const [editRider, setEditRider] = useState<Rider | null>(null);
+  const [riderName, setRiderName] = useState('');
+  const [riderPhone, setRiderPhone] = useState('');
+  const [riderPin, setRiderPin] = useState('');
+  const [savingRider, setSavingRider] = useState(false);
+
+  const [showAssignModal, setShowAssignModal] = useState(false);
+  const [selectedOrderId, setSelectedOrderId] = useState('');
+  const [assignRiderId, setAssignRiderId] = useState('');
+  const [assignDeliveryFee, setAssignDeliveryFee] = useState('5000');
+  const [assignNotes, setAssignNotes] = useState('');
+  const [assigning, setAssigning] = useState(false);
+
+  const [showDeliveryDetail, setShowDeliveryDetail] = useState<RiderDelivery | null>(null);
+  const [showOTPVerify, setShowOTPVerify] = useState(false);
+  const [otpInput, setOtpInput] = useState('');
+  const [verifyingOTP, setVerifyingOTP] = useState(false);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+  const [failReason, setFailReason] = useState('');
+  const [showFailModal, setShowFailModal] = useState(false);
+  const [updatingStatus, setUpdatingStatus] = useState(false);
+
+  const db = getSupabaseClient();
+
+  // ─── Data Loading ──────────────────────────────────────────────────────────
+  const loadData = useCallback(async () => {
+    try {
+      const [ridersRes, deliveriesRes] = await Promise.all([
+        db.from('pos_riders').select('*').order('created_at', { ascending: false }),
+        db.from('pos_rider_deliveries').select('*, pos_orders(order_no, customer_name, customer_phone, customer_address, total)').order('assigned_at', { ascending: false }).limit(100),
+      ]);
+      if (ridersRes.data) setRiders(ridersRes.data);
+      if (deliveriesRes.data) {
+        setDeliveries(deliveriesRes.data.map((d: any) => ({
+          ...d,
+          order_no: d.pos_orders?.order_no,
+          customer_name: d.pos_orders?.customer_name,
+          customer_phone: d.pos_orders?.customer_phone,
+          customer_address: d.pos_orders?.customer_address,
+          total: d.pos_orders?.total,
+        })));
+      }
+    } catch {}
+    finally { setLoading(false); setRefreshing(false); }
+  }, []);
+
+  const loadEarnings = useCallback(async () => {
+    try {
+      const { data } = await db.from('pos_rider_earnings').select('*').eq('period_month', earningsMonth).order('created_at', { ascending: false });
+      if (data) setEarnings(data);
+    } catch {}
+  }, [earningsMonth]);
+
+  useEffect(() => { loadData(); }, []);
+  useEffect(() => { if (tabMode === 'earnings') loadEarnings(); }, [tabMode, earningsMonth]);
+
+  const deliveryOrders = useMemo(() =>
+    orders.filter(o => o.type === 'delivery' && o.status !== 'completed' && o.status !== 'cancelled')
+  , [orders]);
+
+  const filteredDeliveries = useMemo(() => {
+    let list = deliveries;
+    if (statusFilter !== 'all') list = list.filter(d => d.status === statusFilter);
+    if (riderFilter !== 'all') list = list.filter(d => d.rider_id === riderFilter);
+    return list;
+  }, [deliveries, statusFilter, riderFilter]);
+
+  const earningsByRider = useMemo(() => {
+    const map: Record<string, { name: string; total: number; count: number }> = {};
+    earnings.forEach(e => {
+      if (!map[e.rider_id]) map[e.rider_id] = { name: e.rider_name, total: 0, count: 0 };
+      if (e.type === 'deduction') map[e.rider_id].total -= e.amount;
+      else { map[e.rider_id].total += e.amount; map[e.rider_id].count += 1; }
+    });
+    return Object.entries(map).map(([id, v]) => ({ id, ...v })).sort((a, b) => b.total - a.total);
+  }, [earnings]);
+
+  // ─── Rider CRUD ────────────────────────────────────────────────────────────
+  const openAddRider = () => {
+    setEditRider(null);
+    setRiderName(''); setRiderPhone(''); setRiderPin('');
+    setShowRiderModal(true);
+  };
+
+  const openEditRider = (rider: Rider) => {
+    setEditRider(rider);
+    setRiderName(rider.name); setRiderPhone(rider.phone); setRiderPin(rider.pin);
+    setShowRiderModal(true);
+  };
+
+  const handleSaveRider = async () => {
+    if (!riderName.trim() || !riderPhone.trim()) { showAlert('Missing Fields', 'Name and phone are required.'); return; }
+    if (riderPin && (riderPin.length !== 4 || !/^\d{4}$/.test(riderPin))) { showAlert('Invalid PIN', 'PIN must be 4 digits.'); return; }
+    setSavingRider(true);
+    try {
+      if (editRider) {
+        await db.from('pos_riders').update({ name: riderName.trim(), phone: riderPhone.trim(), pin: riderPin }).eq('id', editRider.id);
+        setRiders(prev => prev.map(r => r.id === editRider.id ? { ...r, name: riderName.trim(), phone: riderPhone.trim(), pin: riderPin } : r));
+      } else {
+        const id = `rider_${Date.now()}`;
+        await db.from('pos_riders').insert({ id, name: riderName.trim(), phone: riderPhone.trim(), pin: riderPin, status: 'active' });
+        setRiders(prev => [{ id, name: riderName.trim(), phone: riderPhone.trim(), pin: riderPin, status: 'active', created_at: new Date().toISOString() }, ...prev]);
+      }
+      setShowRiderModal(false);
+      showAlert('Saved', `${riderName} ${editRider ? 'updated' : 'added'} successfully.`);
+    } catch { showAlert('Error', 'Could not save rider.'); }
+    finally { setSavingRider(false); }
+  };
+
+  const handleToggleRiderStatus = (rider: Rider) => {
+    const newStatus = rider.status === 'active' ? 'inactive' : 'active';
+    showAlert(`${newStatus === 'inactive' ? 'Deactivate' : 'Reactivate'} Rider`, `${newStatus === 'inactive' ? 'Deactivate' : 'Reactivate'} ${rider.name}?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: newStatus === 'inactive' ? 'Deactivate' : 'Activate', style: newStatus === 'inactive' ? 'destructive' : 'default', onPress: async () => {
+        await db.from('pos_riders').update({ status: newStatus }).eq('id', rider.id);
+        setRiders(prev => prev.map(r => r.id === rider.id ? { ...r, status: newStatus } : r));
+      }},
+    ]);
+  };
+
+  // ─── Assign Delivery ────────────────────────────────────────────────────────
+  const openAssignModal = (orderId: string) => {
+    setSelectedOrderId(orderId); setAssignRiderId(''); setAssignDeliveryFee('5000'); setAssignNotes('');
+    setShowAssignModal(true);
+  };
+
+  const handleAssignDelivery = async () => {
+    if (!assignRiderId) { showAlert('Select Rider', 'Please choose a rider.'); return; }
+    const rider = riders.find(r => r.id === assignRiderId);
+    if (!rider) return;
+    setAssigning(true);
+    try {
+      const delivId = `deliv_${Date.now()}`;
+      const otp = String(Math.floor(1000 + Math.random() * 9000));
+      await db.from('pos_rider_deliveries').insert({
+        id: delivId, order_id: selectedOrderId,
+        rider_id: assignRiderId, rider_name: rider.name, rider_phone: rider.phone,
+        status: 'assigned', delivery_otp: otp, otp_verified: false,
+        notes: assignNotes || null, assigned_at: new Date().toISOString(),
+      });
+      // Record earning
+      const fee = parseFloat(assignDeliveryFee) || 0;
+      if (fee > 0) {
+        await db.from('pos_rider_earnings').insert({
+          id: `earn_${Date.now()}`, rider_id: assignRiderId, rider_name: rider.name,
+          delivery_id: delivId, order_id: selectedOrderId,
+          amount: fee, type: 'delivery_fee',
+          description: `Delivery fee for order ${selectedOrderId.slice(-6)}`,
+          period_month: new Date().toISOString().slice(0, 7),
+        });
+      }
+      setShowAssignModal(false);
+      showAlert('Rider Assigned', `${rider.name} assigned. OTP: ${otp}`);
+      loadData();
+    } catch { showAlert('Error', 'Could not assign rider.'); }
+    finally { setAssigning(false); }
+  };
+
+  // ─── Update Delivery Status ─────────────────────────────────────────────────
+  const handleUpdateStatus = async (delivery: RiderDelivery, newStatus: DeliveryStatus) => {
+    if (newStatus === 'failed') { setShowDeliveryDetail(delivery); setShowFailModal(true); return; }
+    if (newStatus === 'delivered') { setShowDeliveryDetail(delivery); setShowOTPVerify(true); return; }
+    setUpdatingStatus(true);
+    try {
+      const now = new Date().toISOString();
+      const timeField: Record<DeliveryStatus, string | null> = {
+        accepted: 'accepted_at', picked_up: 'picked_up_at',
+        in_transit: null, delivered: 'delivered_at', failed: 'failed_at', assigned: null,
+      };
+      const updateData: any = { status: newStatus, updated_at: now };
+      const tf = timeField[newStatus];
+      if (tf) updateData[tf] = now;
+      await db.from('pos_rider_deliveries').update(updateData).eq('id', delivery.id);
+      setDeliveries(prev => prev.map(d => d.id === delivery.id ? { ...d, status: newStatus, ...updateData } : d));
+      if (showDeliveryDetail?.id === delivery.id) setShowDeliveryDetail(prev => prev ? { ...prev, status: newStatus } : null);
+    } catch { showAlert('Error', 'Could not update status.'); }
+    finally { setUpdatingStatus(false); }
+  };
+
+  const handleVerifyOTP = async () => {
+    if (!showDeliveryDetail) return;
+    if (otpInput !== showDeliveryDetail.delivery_otp) { showAlert('Invalid OTP', 'The OTP entered is incorrect.'); return; }
+    setVerifyingOTP(true);
+    try {
+      const now = new Date().toISOString();
+      await db.from('pos_rider_deliveries').update({ status: 'delivered', otp_verified: true, delivered_at: now, updated_at: now }).eq('id', showDeliveryDetail.id);
+      setDeliveries(prev => prev.map(d => d.id === showDeliveryDetail.id ? { ...d, status: 'delivered', otp_verified: true, delivered_at: now } : d));
+      setShowOTPVerify(false); setOtpInput('');
+      setShowDeliveryDetail(null);
+      showAlert('Delivered!', 'Delivery confirmed with OTP verification.');
+    } catch { showAlert('Error', 'Could not confirm delivery.'); }
+    finally { setVerifyingOTP(false); }
+  };
+
+  const handleMarkFailed = async () => {
+    if (!showDeliveryDetail || !failReason.trim()) { showAlert('Reason Required', 'Please state the reason for failure.'); return; }
+    setUpdatingStatus(true);
+    try {
+      const now = new Date().toISOString();
+      await db.from('pos_rider_deliveries').update({ status: 'failed', fail_reason: failReason.trim(), failed_at: now, updated_at: now }).eq('id', showDeliveryDetail.id);
+      setDeliveries(prev => prev.map(d => d.id === showDeliveryDetail.id ? { ...d, status: 'failed', fail_reason: failReason.trim() } : d));
+      setShowFailModal(false); setFailReason(''); setShowDeliveryDetail(null);
+      showAlert('Marked Failed', 'Delivery marked as failed.');
+    } catch { showAlert('Error', 'Could not update status.'); }
+    finally { setUpdatingStatus(false); }
+  };
+
+  const handleUploadProof = async (delivery: RiderDelivery) => {
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) { showAlert('Permission', 'Gallery permission required.'); return; }
+      const result = await ImagePicker.launchCameraAsync({ quality: 0.7, base64: true });
+      if (result.canceled || !result.assets?.[0]) return;
+      const asset = result.assets[0];
+      if (!asset.base64) return;
+      setUploadingPhoto(true);
+      const ext = 'jpg';
+      const path = `deliveries/${delivery.id}_proof.${ext}`;
+      const bytes = Uint8Array.from(atob(asset.base64), c => c.charCodeAt(0));
+      const { error } = await db.storage.from('pos-product-images').upload(path, bytes, { contentType: 'image/jpeg', upsert: true });
+      if (!error) {
+        const { data } = db.storage.from('pos-product-images').getPublicUrl(path);
+        await db.from('pos_rider_deliveries').update({ delivery_photo_url: data.publicUrl }).eq('id', delivery.id);
+        setDeliveries(prev => prev.map(d => d.id === delivery.id ? { ...d, delivery_photo_url: data.publicUrl } : d));
+        showAlert('Photo Uploaded', 'Delivery proof photo saved.');
+      }
+    } catch { showAlert('Error', 'Could not upload photo.'); }
+    finally { setUploadingPhoto(false); }
+  };
+
+  // ─── Financial Report ───────────────────────────────────────────────────────
+  const buildEarningsReportHTML = () => {
+    const totalEarnings = earningsByRider.reduce((s, r) => s + r.total, 0);
+    const totalDeliveries = earningsByRider.reduce((s, r) => s + r.count, 0);
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:24px;}
+.header{text-align:center;border-bottom:3px solid #22C55E;padding-bottom:16px;margin-bottom:20px;}
+.brand{font-size:22px;font-weight:900;color:#16A34A;letter-spacing:2px;}
+table{width:100%;border-collapse:collapse;margin:16px 0;}
+th{background:#0A1F0E;color:#22C55E;padding:10px;text-align:left;}td{padding:8px 10px;border-bottom:1px solid #eee;}
+.hi{font-weight:bold;color:#16A34A;}.total{font-size:18px;font-weight:900;color:#16A34A;}
+</style></head><body>
+<div class="header"><div class="brand">HESA GIFT ARENA</div>
+<div style="font-size:17px;font-weight:bold;margin-top:8px;">RIDER EARNINGS REPORT — ${earningsMonth}</div></div>
+<table><tr><th>Summary</th><th>Value</th></tr>
+<tr><td>Total Riders Active</td><td class="hi">${earningsByRider.length}</td></tr>
+<tr><td>Total Deliveries</td><td class="hi">${totalDeliveries}</td></tr>
+<tr><td>Total Earnings Paid Out</td><td class="total">UGX ${totalEarnings.toLocaleString()}</td></tr>
+</table>
+<table><tr><th>#</th><th>Rider</th><th>Deliveries</th><th>Earnings</th></tr>
+${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.count}</td><td class="hi">UGX ${r.total.toLocaleString()}</td></tr>`).join('')}
+</table>
+<p style="text-align:center;font-size:11px;color:#aaa;margin-top:16px;">HESA GIFT ARENA POS · Rider Report · ${earningsMonth}</p>
+</body></html>`;
+  };
+
+  const handleShareReport = async () => {
+    try {
+      const { uri } = await Print.printToFileAsync({ html: buildEarningsReportHTML() });
+      const ok = await Sharing.isAvailableAsync();
+      if (ok) await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Rider Report ${earningsMonth}` });
+    } catch { showAlert('Error', 'Could not generate report.'); }
+  };
+
+  // ─── Stats ──────────────────────────────────────────────────────────────────
+  const stats = useMemo(() => ({
+    total: deliveries.length,
+    assigned: deliveries.filter(d => d.status === 'assigned').length,
+    inProgress: deliveries.filter(d => ['accepted', 'picked_up', 'in_transit'].includes(d.status)).length,
+    delivered: deliveries.filter(d => d.status === 'delivered').length,
+    failed: deliveries.filter(d => d.status === 'failed').length,
+    activeRiders: riders.filter(r => r.status === 'active').length,
+  }), [deliveries, riders]);
+
+  // ─── Render ─────────────────────────────────────────────────────────────────
+  return (
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      {/* Header */}
+      <View style={styles.header}>
+        <View>
+          <Text style={styles.headerTitle}>Rider Management</Text>
+          <Text style={styles.headerSub}>{stats.activeRiders} active riders · {stats.inProgress} in transit</Text>
+        </View>
+        <View style={styles.headerRight}>
+          <TouchableOpacity style={styles.refreshBtn} onPress={() => { setRefreshing(true); loadData(); }}>
+            {refreshing ? <ActivityIndicator size="small" color={Colors.gold} /> : <MaterialIcons name="refresh" size={20} color={Colors.gold} />}
+          </TouchableOpacity>
+          {hasPermission('orders') && (
+            <TouchableOpacity style={styles.addRiderBtn} onPress={openAddRider}>
+              <MaterialIcons name="person-add" size={16} color={Colors.navy} />
+              <Text style={styles.addRiderBtnText}>Add Rider</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      </View>
+
+      {/* Tab Toggle */}
+      <View style={styles.tabRow}>
+        {([
+          { key: 'deliveries', label: 'Deliveries', icon: 'local-shipping' },
+          { key: 'riders', label: 'Riders', icon: 'two-wheeler' },
+          { key: 'earnings', label: 'Earnings', icon: 'payments' },
+        ] as { key: TabMode; label: string; icon: string }[]).map(t => (
+          <TouchableOpacity key={t.key} style={[styles.tabBtn, tabMode === t.key && styles.tabBtnActive]} onPress={() => setTabMode(t.key)}>
+            <MaterialIcons name={t.icon as any} size={15} color={tabMode === t.key ? Colors.navy : Colors.textMuted} />
+            <Text style={[styles.tabBtnText, tabMode === t.key && styles.tabBtnTextActive]}>{t.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* KPI Strip */}
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.kpiStrip}>
+        {[
+          { label: 'Total', value: stats.total, color: Colors.skyBlue },
+          { label: 'Assigned', value: stats.assigned, color: Colors.warning },
+          { label: 'In Transit', value: stats.inProgress, color: Colors.gold },
+          { label: 'Delivered', value: stats.delivered, color: Colors.success },
+          { label: 'Failed', value: stats.failed, color: Colors.danger },
+        ].map(k => (
+          <View key={k.label} style={[styles.kpiChip, { borderColor: k.color + '40' }]}>
+            <Text style={[styles.kpiChipValue, { color: k.color }]}>{k.value}</Text>
+            <Text style={styles.kpiChipLabel}>{k.label}</Text>
+          </View>
+        ))}
+      </ScrollView>
+
+      {/* ── DELIVERIES TAB ───────────────────────────────────────────────────── */}
+      {tabMode === 'deliveries' && (
+        <View style={{ flex: 1 }}>
+          {/* Status Filter */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow}>
+            {(['all', 'assigned', 'accepted', 'picked_up', 'in_transit', 'delivered', 'failed'] as const).map(s => {
+              const cfg = s === 'all' ? null : STATUS_CONFIG[s];
+              const isActive = statusFilter === s;
+              return (
+                <TouchableOpacity
+                  key={s}
+                  style={[styles.filterChip, isActive && { backgroundColor: (cfg?.color || Colors.gold) + '20', borderColor: cfg?.color || Colors.gold }]}
+                  onPress={() => setStatusFilter(s)}
+                >
+                  {cfg && <MaterialIcons name={cfg.icon as any} size={11} color={isActive ? cfg.color : Colors.textMuted} />}
+                  <Text style={[styles.filterChipText, isActive && { color: cfg?.color || Colors.gold, fontWeight: Typography.bold }]}>
+                    {s === 'all' ? 'All' : cfg?.label}
+                  </Text>
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+
+          {/* Unassigned Orders Banner */}
+          {deliveryOrders.length > 0 && hasPermission('orders') && (
+            <TouchableOpacity style={styles.unassignedBanner} onPress={() => setShowAssignModal(true)}>
+              <View style={styles.unassignedLeft}>
+                <MaterialIcons name="local-shipping" size={18} color={Colors.warning} />
+                <View>
+                  <Text style={styles.unassignedTitle}>{deliveryOrders.length} delivery order{deliveryOrders.length !== 1 ? 's' : ''} awaiting rider</Text>
+                  <Text style={styles.unassignedSub}>Tap to assign a rider</Text>
+                </View>
+              </View>
+              <MaterialIcons name="chevron-right" size={18} color={Colors.warning} />
+            </TouchableOpacity>
+          )}
+
+          {loading ? (
+            <View style={styles.centered}><ActivityIndicator size="large" color={Colors.gold} /></View>
+          ) : filteredDeliveries.length === 0 ? (
+            <View style={styles.centered}>
+              <MaterialIcons name="local-shipping" size={56} color={Colors.textMuted} />
+              <Text style={styles.emptyText}>No deliveries found</Text>
+              <Text style={styles.emptySubText}>Assign riders to delivery orders to see them here</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={filteredDeliveries}
+              keyExtractor={item => item.id}
+              contentContainerStyle={styles.listContent}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                const cfg = STATUS_CONFIG[item.status];
+                const nextStatus = NEXT_STATUS[item.status];
+                const nextCfg = nextStatus ? STATUS_CONFIG[nextStatus] : null;
+                return (
+                  <TouchableOpacity style={styles.deliveryCard} onPress={() => setShowDeliveryDetail(item)} activeOpacity={0.85}>
+                    <View style={styles.deliveryCardTop}>
+                      <View style={styles.deliveryCardLeft}>
+                        <View style={[styles.statusIcon, { backgroundColor: cfg.color + '20' }]}>
+                          <MaterialIcons name={cfg.icon as any} size={20} color={cfg.color} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Text style={styles.orderNo}>{item.order_no || item.order_id.slice(-8)}</Text>
+                            <View style={[styles.statusPill, { backgroundColor: cfg.color + '20' }]}>
+                              <Text style={[styles.statusPillText, { color: cfg.color }]}>{cfg.label}</Text>
+                            </View>
+                            {item.otp_verified && <MaterialIcons name="verified" size={14} color={Colors.success} />}
+                          </View>
+                          <Text style={styles.customerName} numberOfLines={1}>{item.customer_name || 'Customer'}</Text>
+                          <Text style={styles.customerAddress} numberOfLines={1}>{item.customer_address || 'No address'}</Text>
+                        </View>
+                      </View>
+                      <View style={{ alignItems: 'flex-end', gap: 4 }}>
+                        {item.total ? <Text style={styles.orderTotal}>{formatUGX(Number(item.total))}</Text> : null}
+                        <Text style={styles.assignedTime}>{new Date(item.assigned_at).toLocaleTimeString('en-UG', { hour: '2-digit', minute: '2-digit' })}</Text>
+                      </View>
+                    </View>
+
+                    <View style={styles.deliveryRiderRow}>
+                      <View style={styles.riderChip}>
+                        <MaterialIcons name="two-wheeler" size={13} color={Colors.skyBlue} />
+                        <Text style={styles.riderChipText}>{item.rider_name}</Text>
+                        <Text style={styles.riderChipPhone}>{item.rider_phone}</Text>
+                      </View>
+                      {item.delivery_photo_url && <MaterialIcons name="photo" size={14} color={Colors.success} />}
+                    </View>
+
+                    {nextStatus && nextCfg && hasPermission('orders') && (
+                      <TouchableOpacity
+                        style={[styles.advanceBtn, { backgroundColor: nextCfg.color + '18', borderColor: nextCfg.color + '50' }]}
+                        onPress={() => handleUpdateStatus(item, nextStatus)}
+                        disabled={updatingStatus}
+                      >
+                        <MaterialIcons name={nextCfg.icon as any} size={13} color={nextCfg.color} />
+                        <Text style={[styles.advanceBtnText, { color: nextCfg.color }]}>Mark as {nextCfg.label}</Text>
+                      </TouchableOpacity>
+                    )}
+                    {item.status === 'in_transit' && hasPermission('orders') && (
+                      <TouchableOpacity
+                        style={[styles.advanceBtn, { backgroundColor: Colors.danger + '18', borderColor: Colors.danger + '50', marginTop: 4 }]}
+                        onPress={() => { setShowDeliveryDetail(item); setShowFailModal(true); }}
+                      >
+                        <MaterialIcons name="cancel" size={13} color={Colors.danger} />
+                        <Text style={[styles.advanceBtnText, { color: Colors.danger }]}>Mark Failed</Text>
+                      </TouchableOpacity>
+                    )}
+                  </TouchableOpacity>
+                );
+              }}
+            />
+          )}
+        </View>
+      )}
+
+      {/* ── RIDERS TAB ───────────────────────────────────────────────────────── */}
+      {tabMode === 'riders' && (
+        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+          {/* Search */}
+          <View style={styles.searchBox}>
+            <MaterialIcons name="search" size={16} color={Colors.textMuted} />
+            <TextInput style={styles.searchInput} placeholder="Search riders..." placeholderTextColor={Colors.textMuted} value={searchRider} onChangeText={setSearchRider} />
+          </View>
+
+          {riders.filter(r => !searchRider || r.name.toLowerCase().includes(searchRider.toLowerCase()) || r.phone.includes(searchRider)).map(rider => {
+            const riderDeliveries = deliveries.filter(d => d.rider_id === rider.id);
+            const active = riderDeliveries.filter(d => ['assigned', 'accepted', 'picked_up', 'in_transit'].includes(d.status)).length;
+            const completed = riderDeliveries.filter(d => d.status === 'delivered').length;
+            return (
+              <View key={rider.id} style={[styles.riderCard, rider.status === 'inactive' && { opacity: 0.6 }]}>
+                <View style={styles.riderCardLeft}>
+                  <View style={[styles.riderAvatar, { backgroundColor: rider.status === 'active' ? Colors.gold + '20' : Colors.navyLight }]}>
+                    <Text style={[styles.riderAvatarText, { color: rider.status === 'active' ? Colors.gold : Colors.textMuted }]}>
+                      {rider.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                    </Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <Text style={styles.riderName}>{rider.name}</Text>
+                      <View style={[styles.riderStatusPill, { backgroundColor: rider.status === 'active' ? Colors.successMuted : Colors.dangerMuted }]}>
+                        <View style={[styles.riderStatusDot, { backgroundColor: rider.status === 'active' ? Colors.success : Colors.danger }]} />
+                        <Text style={[styles.riderStatusText, { color: rider.status === 'active' ? Colors.success : Colors.danger }]}>{rider.status}</Text>
+                      </View>
+                    </View>
+                    <Text style={styles.riderPhone}>{rider.phone}</Text>
+                    <View style={styles.riderStats}>
+                      {active > 0 && <View style={styles.riderStatChip}><MaterialIcons name="local-shipping" size={10} color={Colors.warning} /><Text style={[styles.riderStatText, { color: Colors.warning }]}>{active} active</Text></View>}
+                      <View style={styles.riderStatChip}><MaterialIcons name="done-all" size={10} color={Colors.success} /><Text style={[styles.riderStatText, { color: Colors.success }]}>{completed} done</Text></View>
+                    </View>
+                  </View>
+                </View>
+                <View style={styles.riderCardActions}>
+                  {hasPermission('orders') && (
+                    <TouchableOpacity style={styles.riderActionBtn} onPress={() => openEditRider(rider)}>
+                      <MaterialIcons name="edit" size={14} color={Colors.skyBlue} />
+                    </TouchableOpacity>
+                  )}
+                  {hasPermission('orders') && (
+                    <TouchableOpacity
+                      style={[styles.riderActionBtn, { borderColor: (rider.status === 'active' ? Colors.danger : Colors.success) + '40' }]}
+                      onPress={() => handleToggleRiderStatus(rider)}
+                    >
+                      <MaterialIcons name={rider.status === 'active' ? 'person-off' : 'person'} size={14} color={rider.status === 'active' ? Colors.danger : Colors.success} />
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </View>
+            );
+          })}
+
+          {riders.length === 0 && (
+            <View style={styles.centered}>
+              <MaterialIcons name="two-wheeler" size={56} color={Colors.textMuted} />
+              <Text style={styles.emptyText}>No riders yet</Text>
+              <TouchableOpacity style={styles.emptyAddBtn} onPress={openAddRider}>
+                <MaterialIcons name="person-add" size={16} color={Colors.navy} />
+                <Text style={styles.emptyAddBtnText}>Add First Rider</Text>
+              </TouchableOpacity>
+            </View>
+          )}
+        </ScrollView>
+      )}
+
+      {/* ── EARNINGS TAB ─────────────────────────────────────────────────────── */}
+      {tabMode === 'earnings' && (
+        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+          {/* Month selector */}
+          <View style={styles.monthPickerRow}>
+            <TouchableOpacity style={styles.monthBtn} onPress={() => {
+              const d = new Date(earningsMonth + '-01');
+              d.setMonth(d.getMonth() - 1);
+              setEarningsMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-left" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <Text style={styles.monthLabel}>{new Date(earningsMonth + '-01').toLocaleDateString('en-UG', { year: 'numeric', month: 'long' })}</Text>
+            <TouchableOpacity style={styles.monthBtn} onPress={() => {
+              const d = new Date(earningsMonth + '-01');
+              d.setMonth(d.getMonth() + 1);
+              setEarningsMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-right" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.shareReportBtn} onPress={handleShareReport}>
+              <MaterialIcons name="share" size={15} color={Colors.navy} />
+              <Text style={styles.shareReportBtnText}>Report</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Summary Cards */}
+          <View style={styles.earningsSummary}>
+            {[
+              { label: 'Total Payout', value: formatUGX(earningsByRider.reduce((s, r) => s + r.total, 0)), color: Colors.gold },
+              { label: 'Deliveries', value: String(earningsByRider.reduce((s, r) => s + r.count, 0)), color: Colors.skyBlue },
+              { label: 'Riders Paid', value: String(earningsByRider.length), color: Colors.success },
+            ].map(k => (
+              <View key={k.label} style={[styles.earningSummaryCard, { borderColor: k.color + '30' }]}>
+                <Text style={[styles.earningSummaryValue, { color: k.color }]}>{k.value}</Text>
+                <Text style={styles.earningSummaryLabel}>{k.label}</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Rider Breakdown */}
+          {earningsByRider.length === 0 ? (
+            <View style={styles.centered}>
+              <MaterialIcons name="payments" size={48} color={Colors.textMuted} />
+              <Text style={styles.emptyText}>No earnings recorded for {earningsMonth}</Text>
+            </View>
+          ) : earningsByRider.map((rider, i) => (
+            <View key={rider.id} style={styles.earningRiderCard}>
+              <View style={styles.earningRiderTop}>
+                <View style={[styles.earningRank, { backgroundColor: i === 0 ? Colors.gold : i === 1 ? '#A8A8A8' : Colors.navyLight }]}>
+                  <Text style={[styles.earningRankText, { color: i < 2 ? Colors.navy : Colors.textMuted }]}>#{i + 1}</Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.earningRiderName}>{rider.name}</Text>
+                  <Text style={styles.earningRiderMeta}>{rider.count} deliveries completed</Text>
+                </View>
+                <Text style={styles.earningRiderTotal}>{formatUGX(rider.total)}</Text>
+              </View>
+              <View style={styles.earningBar}>
+                <View style={[styles.earningBarFill, {
+                  width: `${Math.min(100, (rider.total / (earningsByRider[0]?.total || 1)) * 100)}%`,
+                  backgroundColor: i === 0 ? Colors.gold : Colors.success,
+                }]} />
+              </View>
+            </View>
+          ))}
+
+          {/* Transaction Log */}
+          {earnings.length > 0 && (
+            <View style={styles.earningsLogSection}>
+              <Text style={styles.logSectionTitle}>Transaction Log</Text>
+              {earnings.slice(0, 20).map(e => (
+                <View key={e.id} style={styles.earningLogRow}>
+                  <View style={[styles.earningLogIcon, { backgroundColor: e.type === 'deduction' ? Colors.dangerMuted : Colors.successMuted }]}>
+                    <MaterialIcons name={e.type === 'deduction' ? 'remove' : 'add'} size={14} color={e.type === 'deduction' ? Colors.danger : Colors.success} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.earningLogName}>{e.rider_name}</Text>
+                    <Text style={styles.earningLogDesc} numberOfLines={1}>{e.description}</Text>
+                  </View>
+                  <Text style={[styles.earningLogAmount, { color: e.type === 'deduction' ? Colors.danger : Colors.success }]}>
+                    {e.type === 'deduction' ? '-' : '+'}{formatUGX(e.amount)}
+                  </Text>
+                </View>
+              ))}
+            </View>
+          )}
+        </ScrollView>
+      )}
+
+      {/* ── ASSIGN RIDER MODAL ────────────────────────────────────────────────── */}
+      <Modal visible={showAssignModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modal}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>Assign Rider</Text>
+              <TouchableOpacity onPress={() => setShowAssignModal(false)}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+            </View>
+            <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+              {/* Order Picker */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Select Order *</Text>
+                {deliveryOrders.length === 0 ? (
+                  <View style={styles.noOrdersBanner}>
+                    <MaterialIcons name="info" size={14} color={Colors.skyBlue} />
+                    <Text style={styles.noOrdersText}>No unassigned delivery orders</Text>
+                  </View>
+                ) : deliveryOrders.map(order => (
+                  <TouchableOpacity
+                    key={order.id}
+                    style={[styles.orderPickRow, selectedOrderId === order.id && styles.orderPickRowActive]}
+                    onPress={() => setSelectedOrderId(order.id)}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.orderPickNo}>{order.orderNo}</Text>
+                      <Text style={styles.orderPickCustomer}>{order.customerName} · {order.customerPhone}</Text>
+                      <Text style={styles.orderPickAddr} numberOfLines={1}>{order.customerAddress || 'No address'}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={styles.orderPickTotal}>{formatUGX(order.total)}</Text>
+                      {selectedOrderId === order.id && <MaterialIcons name="check-circle" size={18} color={Colors.gold} />}
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              {/* Rider Picker */}
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Select Rider *</Text>
+                {riders.filter(r => r.status === 'active').map(rider => (
+                  <TouchableOpacity
+                    key={rider.id}
+                    style={[styles.riderPickRow, assignRiderId === rider.id && styles.riderPickRowActive]}
+                    onPress={() => setAssignRiderId(rider.id)}
+                  >
+                    <View style={[styles.riderPickAvatar, { backgroundColor: assignRiderId === rider.id ? Colors.gold + '20' : Colors.navyLight }]}>
+                      <Text style={[styles.riderPickAvatarText, { color: assignRiderId === rider.id ? Colors.gold : Colors.textMuted }]}>
+                        {rider.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                      </Text>
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Text style={[styles.riderPickName, assignRiderId === rider.id && { color: Colors.gold }]}>{rider.name}</Text>
+                      <Text style={styles.riderPickPhone}>{rider.phone}</Text>
+                    </View>
+                    {assignRiderId === rider.id && <MaterialIcons name="check-circle" size={18} color={Colors.gold} />}
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Delivery Fee (UGX)</Text>
+                <View style={styles.inputWrap}>
+                  <MaterialIcons name="payments" size={15} color={Colors.textMuted} />
+                  <TextInput style={styles.input} placeholder="5000" placeholderTextColor={Colors.textMuted} value={assignDeliveryFee} onChangeText={setAssignDeliveryFee} keyboardType="numeric" />
+                </View>
+              </View>
+
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Notes (optional)</Text>
+                <TextInput style={[styles.inputWrap, { height: 60, textAlignVertical: 'top', paddingVertical: 10, paddingHorizontal: 12 }]} placeholder="Delivery instructions..." placeholderTextColor={Colors.textMuted} value={assignNotes} onChangeText={setAssignNotes} multiline />
+              </View>
+            </ScrollView>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowAssignModal(false)}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, (assigning || !selectedOrderId || !assignRiderId) && { opacity: 0.5 }]} onPress={handleAssignDelivery} disabled={assigning || !selectedOrderId || !assignRiderId}>
+                {assigning ? <ActivityIndicator color={Colors.navy} size="small" /> : <><MaterialIcons name="assignment-ind" size={16} color={Colors.navy} /><Text style={styles.confirmBtnText}>Assign Rider</Text></>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── ADD/EDIT RIDER MODAL ──────────────────────────────────────────────── */}
+      <Modal visible={showRiderModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modal, { maxHeight: '60%' }]}>
+            <View style={styles.modalHeader}>
+              <Text style={styles.modalTitle}>{editRider ? 'Edit Rider' : 'Add New Rider'}</Text>
+              <TouchableOpacity onPress={() => setShowRiderModal(false)}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+            </View>
+            <View style={styles.modalBody}>
+              {[
+                { label: 'Full Name *', value: riderName, onChange: setRiderName, placeholder: 'Rider full name', icon: 'person' },
+                { label: 'Phone Number *', value: riderPhone, onChange: setRiderPhone, placeholder: '+256 7XX XXX XXX', icon: 'phone', keyboard: 'phone-pad' as const },
+                { label: 'PIN (4 digits)', value: riderPin, onChange: setRiderPin, placeholder: '4-digit PIN', icon: 'pin', keyboard: 'numeric' as const, secure: true },
+              ].map(f => (
+                <View key={f.label} style={styles.formGroup}>
+                  <Text style={styles.formLabel}>{f.label}</Text>
+                  <View style={styles.inputWrap}>
+                    <MaterialIcons name={f.icon as any} size={15} color={Colors.textMuted} />
+                    <TextInput style={styles.input} placeholder={f.placeholder} placeholderTextColor={Colors.textMuted} value={f.value} onChangeText={f.onChange} keyboardType={f.keyboard || 'default'} maxLength={f.label.includes('PIN') ? 4 : undefined} secureTextEntry={f.secure} />
+                  </View>
+                </View>
+              ))}
+            </View>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowRiderModal(false)}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, savingRider && { opacity: 0.7 }]} onPress={handleSaveRider} disabled={savingRider}>
+                {savingRider ? <ActivityIndicator color={Colors.navy} size="small" /> : <><MaterialIcons name="check" size={16} color={Colors.navy} /><Text style={styles.confirmBtnText}>{editRider ? 'Update' : 'Add Rider'}</Text></>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── DELIVERY DETAIL MODAL ─────────────────────────────────────────────── */}
+      <Modal visible={!!showDeliveryDetail && !showOTPVerify && !showFailModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={styles.modal}>
+            {showDeliveryDetail && (() => {
+              const d = showDeliveryDetail;
+              const cfg = STATUS_CONFIG[d.status];
+              return (
+                <>
+                  <View style={styles.modalHeader}>
+                    <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                      <MaterialIcons name={cfg.icon as any} size={20} color={cfg.color} />
+                      <Text style={[styles.modalTitle, { color: cfg.color }]}>{d.order_no || 'Delivery'}</Text>
+                    </View>
+                    <TouchableOpacity onPress={() => setShowDeliveryDetail(null)}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+                  </View>
+                  <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
+                    <View style={[styles.detailStatusBanner, { backgroundColor: cfg.color + '15', borderColor: cfg.color + '40' }]}>
+                      <MaterialIcons name={cfg.icon as any} size={22} color={cfg.color} />
+                      <View>
+                        <Text style={[styles.detailStatusLabel, { color: cfg.color }]}>{cfg.label}</Text>
+                        {d.otp_verified && <Text style={{ fontSize: Typography.xs, color: Colors.success }}>OTP Verified ✓</Text>}
+                      </View>
+                    </View>
+                    {[
+                      { label: 'Customer', value: d.customer_name || '—', icon: 'person' },
+                      { label: 'Phone', value: d.customer_phone || '—', icon: 'phone' },
+                      { label: 'Address', value: d.customer_address || 'No address', icon: 'location-on' },
+                      { label: 'Rider', value: `${d.rider_name} · ${d.rider_phone}`, icon: 'two-wheeler' },
+                      { label: 'Assigned', value: new Date(d.assigned_at).toLocaleString('en-UG'), icon: 'schedule' },
+                      ...(d.delivered_at ? [{ label: 'Delivered', value: new Date(d.delivered_at).toLocaleString('en-UG'), icon: 'done-all' }] : []),
+                      ...(d.fail_reason ? [{ label: 'Fail Reason', value: d.fail_reason, icon: 'cancel' }] : []),
+                      ...(d.notes ? [{ label: 'Notes', value: d.notes, icon: 'notes' }] : []),
+                    ].map(row => (
+                      <View key={row.label} style={styles.detailRow}>
+                        <MaterialIcons name={row.icon as any} size={14} color={Colors.textMuted} />
+                        <Text style={styles.detailRowLabel}>{row.label}:</Text>
+                        <Text style={styles.detailRowValue} numberOfLines={2}>{row.value}</Text>
+                      </View>
+                    ))}
+
+                    {d.delivery_photo_url && (
+                      <View style={styles.proofSection}>
+                        <Text style={styles.proofLabel}>Delivery Proof Photo</Text>
+                        <Image source={{ uri: d.delivery_photo_url }} style={styles.proofImg} contentFit="cover" />
+                      </View>
+                    )}
+
+                    {/* OTP Display */}
+                    {d.status !== 'delivered' && d.status !== 'failed' && (
+                      <View style={styles.otpCard}>
+                        <MaterialIcons name="security" size={16} color={Colors.gold} />
+                        <View>
+                          <Text style={styles.otpLabel}>Delivery OTP (share with rider)</Text>
+                          <Text style={styles.otpValue}>{d.delivery_otp}</Text>
+                        </View>
+                      </View>
+                    )}
+
+                    {/* Actions */}
+                    <View style={styles.detailActions}>
+                      {!d.delivery_photo_url && d.status === 'in_transit' && (
+                        <TouchableOpacity style={styles.detailActionBtn} onPress={() => handleUploadProof(d)} disabled={uploadingPhoto}>
+                          {uploadingPhoto ? <ActivityIndicator size="small" color={Colors.skyBlue} /> : <MaterialIcons name="photo-camera" size={16} color={Colors.skyBlue} />}
+                          <Text style={[styles.detailActionText, { color: Colors.skyBlue }]}>Upload Proof</Text>
+                        </TouchableOpacity>
+                      )}
+                      {NEXT_STATUS[d.status] && (
+                        <TouchableOpacity
+                          style={[styles.detailActionBtn, { backgroundColor: Colors.gold, borderColor: Colors.gold }]}
+                          onPress={() => handleUpdateStatus(d, NEXT_STATUS[d.status]!)}
+                          disabled={updatingStatus}
+                        >
+                          {updatingStatus ? <ActivityIndicator size="small" color={Colors.navy} /> : <MaterialIcons name={STATUS_CONFIG[NEXT_STATUS[d.status]!].icon as any} size={16} color={Colors.navy} />}
+                          <Text style={[styles.detailActionText, { color: Colors.navy, fontWeight: Typography.bold }]}>Mark {STATUS_CONFIG[NEXT_STATUS[d.status]!].label}</Text>
+                        </TouchableOpacity>
+                      )}
+                    </View>
+                  </ScrollView>
+                </>
+              );
+            })()}
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── OTP VERIFY MODAL ─────────────────────────────────────────────────── */}
+      <Modal visible={showOTPVerify} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modal, { maxHeight: '50%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="security" size={20} color={Colors.gold} />
+                <Text style={styles.modalTitle}>Verify Delivery OTP</Text>
+              </View>
+              <TouchableOpacity onPress={() => { setShowOTPVerify(false); setOtpInput(''); }}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+            </View>
+            <View style={styles.modalBody}>
+              <Text style={styles.otpInstructions}>Enter the 4-digit OTP provided by the customer to confirm delivery.</Text>
+              <View style={styles.otpInputWrap}>
+                <MaterialIcons name="lock" size={18} color={Colors.gold} />
+                <TextInput
+                  style={styles.otpInputField}
+                  placeholder="0000"
+                  placeholderTextColor={Colors.textMuted}
+                  value={otpInput}
+                  onChangeText={setOtpInput}
+                  keyboardType="numeric"
+                  maxLength={4}
+                  autoFocus
+                />
+              </View>
+              <View style={styles.otpDots}>
+                {[0, 1, 2, 3].map(i => (
+                  <View key={i} style={[styles.otpDot, i < otpInput.length && { backgroundColor: Colors.gold }]} />
+                ))}
+              </View>
+            </View>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => { setShowOTPVerify(false); setOtpInput(''); }}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.confirmBtn, (otpInput.length !== 4 || verifyingOTP) && { opacity: 0.5 }]}
+                onPress={handleVerifyOTP}
+                disabled={otpInput.length !== 4 || verifyingOTP}
+              >
+                {verifyingOTP ? <ActivityIndicator color={Colors.navy} size="small" /> : <><MaterialIcons name="verified" size={16} color={Colors.navy} /><Text style={styles.confirmBtnText}>Confirm Delivery</Text></>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ── FAIL REASON MODAL ────────────────────────────────────────────────── */}
+      <Modal visible={showFailModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modal, { maxHeight: '50%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="cancel" size={20} color={Colors.danger} />
+                <Text style={[styles.modalTitle, { color: Colors.danger }]}>Mark as Failed</Text>
+              </View>
+              <TouchableOpacity onPress={() => { setShowFailModal(false); setFailReason(''); }}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+            </View>
+            <View style={styles.modalBody}>
+              <Text style={styles.formLabel}>Reason for Failure *</Text>
+              {['Customer not available', 'Wrong address', 'Customer refused delivery', 'Unsafe area', 'Item damaged', 'Other'].map(reason => (
+                <TouchableOpacity
+                  key={reason}
+                  style={[styles.failReasonChip, failReason === reason && { backgroundColor: Colors.dangerMuted, borderColor: Colors.danger }]}
+                  onPress={() => setFailReason(reason)}
+                >
+                  {failReason === reason && <MaterialIcons name="radio-button-checked" size={14} color={Colors.danger} />}
+                  {failReason !== reason && <MaterialIcons name="radio-button-unchecked" size={14} color={Colors.textMuted} />}
+                  <Text style={[styles.failReasonText, failReason === reason && { color: Colors.danger }]}>{reason}</Text>
+                </TouchableOpacity>
+              ))}
+              <TextInput style={[styles.inputWrap, { height: 60, textAlignVertical: 'top', paddingVertical: 10, paddingHorizontal: 12, marginTop: 8 }]} placeholder="Or type custom reason..." placeholderTextColor={Colors.textMuted} value={failReason} onChangeText={setFailReason} multiline />
+            </View>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => { setShowFailModal(false); setFailReason(''); }}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, { backgroundColor: Colors.danger }, (!failReason || updatingStatus) && { opacity: 0.5 }]} onPress={handleMarkFailed} disabled={!failReason || updatingStatus}>
+                {updatingStatus ? <ActivityIndicator color={Colors.navy} size="small" /> : <><MaterialIcons name="cancel" size={16} color={Colors.navy} /><Text style={styles.confirmBtnText}>Confirm Failed</Text></>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+    </View>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: { flex: 1, backgroundColor: Colors.navy },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: Spacing.base, paddingVertical: Spacing.md, borderBottomWidth: 1, borderBottomColor: Colors.borderGold },
+  headerTitle: { fontSize: Typography.xl, fontWeight: Typography.bold, color: Colors.textPrimary },
+  headerSub: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 2 },
+  headerRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  refreshBtn: { padding: 6 },
+  addRiderBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: Colors.gold, paddingHorizontal: Spacing.md, paddingVertical: 8, borderRadius: BorderRadius.md, ...Shadows.gold },
+  addRiderBtnText: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.navy },
+  tabRow: { flexDirection: 'row', margin: Spacing.md, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, padding: 3, borderWidth: 1, borderColor: Colors.border },
+  tabBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5, paddingVertical: 9, borderRadius: BorderRadius.md },
+  tabBtnActive: { backgroundColor: Colors.gold },
+  tabBtnText: { fontSize: Typography.xs, color: Colors.textMuted, fontWeight: Typography.medium },
+  tabBtnTextActive: { color: Colors.navy, fontWeight: Typography.bold },
+  kpiStrip: { paddingHorizontal: Spacing.base, paddingBottom: Spacing.sm, gap: 8 },
+  kpiChip: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, paddingHorizontal: 14, paddingVertical: 8, alignItems: 'center', minWidth: 64 },
+  kpiChipValue: { fontSize: Typography.lg, fontWeight: Typography.extrabold },
+  kpiChipLabel: { fontSize: 10, color: Colors.textMuted, marginTop: 1 },
+  filterRow: { paddingHorizontal: Spacing.base, paddingBottom: Spacing.sm, gap: 6 },
+  filterChip: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.circle, backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border },
+  filterChipText: { fontSize: 11, color: Colors.textMuted },
+  unassignedBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: Colors.warningMuted, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.warning + '40', marginHorizontal: Spacing.base, marginBottom: Spacing.sm, paddingHorizontal: Spacing.md, paddingVertical: 10 },
+  unassignedLeft: { flexDirection: 'row', alignItems: 'center', gap: 10, flex: 1 },
+  unassignedTitle: { fontSize: Typography.sm, fontWeight: Typography.semibold, color: Colors.warning },
+  unassignedSub: { fontSize: Typography.xs, color: Colors.textMuted },
+  listContent: { paddingHorizontal: Spacing.base, paddingBottom: 100, gap: Spacing.sm },
+  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingVertical: 60, gap: 12 },
+  emptyText: { fontSize: Typography.base, color: Colors.textMuted },
+  emptySubText: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'center', paddingHorizontal: 40 },
+  emptyAddBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: Colors.gold, paddingHorizontal: 16, paddingVertical: 10, borderRadius: BorderRadius.md, marginTop: 4 },
+  emptyAddBtnText: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.navy },
+  // Delivery Card
+  deliveryCard: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, gap: 8, ...Shadows.sm },
+  deliveryCardTop: { flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  deliveryCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'flex-start', gap: 10 },
+  statusIcon: { width: 44, height: 44, borderRadius: 12, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  orderNo: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.skyBlue },
+  statusPill: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: BorderRadius.circle },
+  statusPillText: { fontSize: 10, fontWeight: Typography.bold },
+  customerName: { fontSize: Typography.sm, fontWeight: Typography.medium, color: Colors.textPrimary, marginTop: 2 },
+  customerAddress: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 1 },
+  orderTotal: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
+  assignedTime: { fontSize: 10, color: Colors.textMuted },
+  deliveryRiderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  riderChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.skyBlueMuted, paddingHorizontal: 8, paddingVertical: 4, borderRadius: BorderRadius.circle },
+  riderChipText: { fontSize: 11, fontWeight: Typography.semibold, color: Colors.skyBlue },
+  riderChipPhone: { fontSize: 10, color: Colors.textMuted },
+  advanceBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 8, borderRadius: BorderRadius.md, borderWidth: 1 },
+  advanceBtnText: { fontSize: Typography.sm, fontWeight: Typography.semibold },
+  // Rider Card
+  riderCard: { flexDirection: 'row', alignItems: 'center', gap: 12, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md },
+  riderCardLeft: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 12 },
+  riderAvatar: { width: 48, height: 48, borderRadius: 24, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: Colors.borderGold },
+  riderAvatarText: { fontSize: Typography.base, fontWeight: Typography.extrabold },
+  riderName: { fontSize: Typography.sm, fontWeight: Typography.semibold, color: Colors.textPrimary },
+  riderPhone: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 2 },
+  riderStatusPill: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 7, paddingVertical: 2, borderRadius: BorderRadius.circle },
+  riderStatusDot: { width: 5, height: 5, borderRadius: 2.5 },
+  riderStatusText: { fontSize: 9, fontWeight: Typography.bold },
+  riderStats: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 4 },
+  riderStatChip: { flexDirection: 'row', alignItems: 'center', gap: 3 },
+  riderStatText: { fontSize: 10, fontWeight: Typography.medium },
+  riderCardActions: { gap: 5 },
+  riderActionBtn: { width: 34, height: 34, borderRadius: BorderRadius.sm, backgroundColor: Colors.navyLight, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.border },
+  searchBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md, paddingVertical: 8 },
+  searchInput: { flex: 1, color: Colors.textPrimary, fontSize: Typography.sm, paddingVertical: 4 },
+  // Earnings
+  monthPickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, marginBottom: 4 },
+  monthBtn: { padding: 6 },
+  monthLabel: { flex: 1, textAlign: 'center', fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.textPrimary },
+  shareReportBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.gold, paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.md },
+  shareReportBtnText: { fontSize: 11, fontWeight: Typography.bold, color: Colors.navy },
+  earningsSummary: { flexDirection: 'row', gap: 10 },
+  earningSummaryCard: { flex: 1, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, padding: Spacing.md, alignItems: 'center', gap: 4 },
+  earningSummaryValue: { fontSize: Typography.base, fontWeight: Typography.extrabold },
+  earningSummaryLabel: { fontSize: 10, color: Colors.textMuted, textAlign: 'center' },
+  earningRiderCard: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, gap: 8 },
+  earningRiderTop: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  earningRank: { width: 30, height: 30, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  earningRankText: { fontSize: 11, fontWeight: Typography.extrabold },
+  earningRiderName: { fontSize: Typography.sm, fontWeight: Typography.semibold, color: Colors.textPrimary },
+  earningRiderMeta: { fontSize: Typography.xs, color: Colors.textMuted },
+  earningRiderTotal: { fontSize: Typography.base, fontWeight: Typography.extrabold, color: Colors.gold },
+  earningBar: { height: 6, backgroundColor: Colors.navyLight, borderRadius: 3, overflow: 'hidden' },
+  earningBarFill: { height: '100%', borderRadius: 3 },
+  earningsLogSection: { gap: 6 },
+  logSectionTitle: { fontSize: Typography.xs, fontWeight: Typography.bold, color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 1, marginTop: 8 },
+  earningLogRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, padding: Spacing.sm, borderWidth: 1, borderColor: Colors.border },
+  earningLogIcon: { width: 30, height: 30, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  earningLogName: { fontSize: Typography.xs, fontWeight: Typography.semibold, color: Colors.textPrimary },
+  earningLogDesc: { fontSize: 10, color: Colors.textMuted },
+  earningLogAmount: { fontSize: Typography.sm, fontWeight: Typography.bold },
+  // Modals
+  modalOverlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end' },
+  modal: { backgroundColor: Colors.navyMid, borderTopLeftRadius: BorderRadius.xxl, borderTopRightRadius: BorderRadius.xxl, maxHeight: '90%', borderTopWidth: 2, borderColor: Colors.borderGold },
+  modalHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: Spacing.xl, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  modalTitle: { fontSize: Typography.xl, fontWeight: Typography.bold, color: Colors.gold },
+  modalBody: { padding: Spacing.xl, gap: Spacing.md },
+  modalFooter: { flexDirection: 'row', gap: 12, padding: Spacing.xl, borderTopWidth: 1, borderTopColor: Colors.divider },
+  cancelBtn: { flex: 1, paddingVertical: 14, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, alignItems: 'center' },
+  cancelBtnText: { color: Colors.textMuted, fontWeight: Typography.semibold },
+  confirmBtn: { flex: 2, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: BorderRadius.md, backgroundColor: Colors.gold, ...Shadows.gold },
+  confirmBtnText: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.navy },
+  formGroup: { gap: 6 },
+  formLabel: { fontSize: Typography.xs, color: Colors.textSecondary, fontWeight: Typography.semibold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  inputWrap: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md },
+  input: { flex: 1, color: Colors.textPrimary, fontSize: Typography.sm, paddingVertical: 12 },
+  // Order/Rider pickers
+  orderPickRow: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, flexDirection: 'row', alignItems: 'center', gap: 10 },
+  orderPickRowActive: { borderColor: Colors.gold, backgroundColor: Colors.goldSubtle },
+  orderPickNo: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.skyBlue },
+  orderPickCustomer: { fontSize: Typography.xs, color: Colors.textSecondary, marginTop: 2 },
+  orderPickAddr: { fontSize: 10, color: Colors.textMuted },
+  orderPickTotal: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
+  riderPickRow: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, padding: Spacing.sm },
+  riderPickRowActive: { borderColor: Colors.gold, backgroundColor: Colors.goldSubtle },
+  riderPickAvatar: { width: 38, height: 38, borderRadius: 19, alignItems: 'center', justifyContent: 'center' },
+  riderPickAvatarText: { fontSize: Typography.xs, fontWeight: Typography.extrabold },
+  riderPickName: { fontSize: Typography.sm, fontWeight: Typography.medium, color: Colors.textPrimary },
+  riderPickPhone: { fontSize: 10, color: Colors.textMuted },
+  noOrdersBanner: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.skyBlueMuted, borderRadius: BorderRadius.md, padding: Spacing.sm, borderWidth: 1, borderColor: Colors.skyBlue + '30' },
+  noOrdersText: { fontSize: Typography.xs, color: Colors.skyBlue },
+  // Delivery detail
+  detailStatusBanner: { flexDirection: 'row', alignItems: 'center', gap: 10, borderRadius: BorderRadius.md, borderWidth: 1, padding: Spacing.md },
+  detailStatusLabel: { fontSize: Typography.base, fontWeight: Typography.bold },
+  detailRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 8 },
+  detailRowLabel: { fontSize: Typography.xs, color: Colors.textMuted, width: 72 },
+  detailRowValue: { flex: 1, fontSize: Typography.sm, color: Colors.textSecondary },
+  proofSection: { gap: 6 },
+  proofLabel: { fontSize: Typography.xs, color: Colors.textMuted, fontWeight: Typography.semibold },
+  proofImg: { width: '100%', height: 180, borderRadius: BorderRadius.md },
+  otpCard: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.goldSubtle, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.borderGold, padding: Spacing.md },
+  otpLabel: { fontSize: Typography.xs, color: Colors.textMuted },
+  otpValue: { fontSize: Typography.xxl, fontWeight: Typography.extrabold, color: Colors.gold, letterSpacing: 4 },
+  detailActions: { flexDirection: 'row', gap: 10 },
+  detailActionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 12, borderRadius: BorderRadius.md, backgroundColor: Colors.skyBlueMuted, borderWidth: 1, borderColor: Colors.skyBlue + '40' },
+  detailActionText: { fontSize: Typography.sm, fontWeight: Typography.semibold },
+  // OTP modal
+  otpInstructions: { fontSize: Typography.sm, color: Colors.textSecondary, textAlign: 'center', lineHeight: 20 },
+  otpInputWrap: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 2, borderColor: Colors.borderGold, paddingHorizontal: Spacing.xl, paddingVertical: 12 },
+  otpInputField: { flex: 1, fontSize: 32, fontWeight: Typography.extrabold, color: Colors.gold, textAlign: 'center', letterSpacing: 8 },
+  otpDots: { flexDirection: 'row', justifyContent: 'center', gap: 12 },
+  otpDot: { width: 14, height: 14, borderRadius: 7, backgroundColor: Colors.navyLight, borderWidth: 2, borderColor: Colors.border },
+  // Fail reason
+  failReasonChip: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, paddingVertical: 9, borderRadius: BorderRadius.md, backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border },
+  failReasonText: { fontSize: Typography.sm, color: Colors.textMuted },
+});

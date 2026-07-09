@@ -100,6 +100,14 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
+        name="riders"
+        options={{
+          title: 'Riders',
+          tabBarIcon: ({ color, size }) => <MaterialIcons name="two-wheeler" size={size} color={color} />,
+          tabBarItemStyle: (isCashier || isInventoryOfficer) ? { display: 'none' } : undefined,
+        }}
+      />
+      <Tabs.Screen
         name="reports"
         options={{
           title: 'Reports',

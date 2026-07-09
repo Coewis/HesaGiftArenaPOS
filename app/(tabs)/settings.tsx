@@ -24,8 +24,8 @@ const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
 const DEFAULT_SETTINGS = {
   storeName: 'HESA GIFT ARENA',
   storeAddress: 'Plot 14, Kampala Road, Kampala, Uganda',
-  storePhone: '+256 700 000 001',
-  storeEmail: 'info@hesagift.ug',
+  storePhone: '0748152333',
+  storeEmail: 'hesagiftarena@protonmail.com',
   receiptFooter: '"Where Every Gift Tells a Beautiful Story."',
   taxRate: '0',
   sessionTimeout: '3',

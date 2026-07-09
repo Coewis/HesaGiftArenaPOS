@@ -22,7 +22,7 @@ const isTablet = SCREEN_WIDTH >= 768;
 const CHART_W = isDesktop ? Math.min(520, SCREEN_WIDTH * 0.45) : isTablet ? SCREEN_WIDTH - 64 : SCREEN_WIDTH - 48;
 
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
-type Period = 'today' | 'week' | 'month';
+type Period = 'today' | 'week' | 'month' | 'financial';
 
 const CHART_CONFIG = {
   backgroundColor: Colors.navyCard,
@@ -63,6 +63,7 @@ export default function ReportsScreen() {
   const { currentBranch, setBranch, branches } = useBranch();
   const { showAlert } = useAlert();
   const [period, setPeriod] = useState<Period>('today');
+  const [financialMonth, setFinancialMonth] = useState(new Date().toISOString().slice(0, 7));
   const [showBranchFilter, setShowBranchFilter] = useState(false);
   const [showEODModal, setShowEODModal] = useState(false);
   const [generatingEOD, setGeneratingEOD] = useState(false);
@@ -81,6 +82,94 @@ export default function ReportsScreen() {
     if (period === 'week') return { revenue: DASHBOARD_STATS.thisWeek.revenue, transactions: DASHBOARD_STATS.thisWeek.transactions, avg: Math.round(DASHBOARD_STATS.thisWeek.revenue / DASHBOARD_STATS.thisWeek.transactions) };
     return { revenue: DASHBOARD_STATS.thisMonth.revenue, transactions: DASHBOARD_STATS.thisMonth.transactions, avg: Math.round(DASHBOARD_STATS.thisMonth.revenue / DASHBOARD_STATS.thisMonth.transactions) };
   }, [period]);
+
+  // ─── Financial Report Data ─────────────────────────────────────────────────
+  const financialData = useMemo(() => {
+    const monthSales = sales.filter(s => s.timestamp.startsWith(financialMonth) && s.status === 'completed');
+    const monthRefunds = sales.filter(s => s.timestamp.startsWith(financialMonth) && s.status === 'refunded');
+    const totalRevenue = monthSales.reduce((sum, s) => sum + s.total, 0);
+    const totalRefunds = monthRefunds.reduce((sum, s) => sum + s.total, 0);
+    const totalDiscount = monthSales.reduce((sum, s) => sum + (s.discount || 0), 0);
+    const cogs = monthSales.reduce((sum, s) => {
+      return sum + s.items.reduce((is, i) => {
+        const prod = products.find(p => p.id === i.productId);
+        return is + (prod ? prod.buyingPrice * i.qty : 0);
+      }, 0);
+    }, 0);
+    const grossProfit = totalRevenue - cogs;
+    const netProfit = grossProfit - totalRefunds;
+    const inventoryValue = products.filter(p => p.status === 'active').reduce((sum, p) => sum + p.buyingPrice * p.stock, 0);
+    const inventoryRetailValue = products.filter(p => p.status === 'active').reduce((sum, p) => sum + p.price * p.stock, 0);
+    const topSelling = [...products].sort((a, b) => {
+      const soldA = monthSales.reduce((s, sale) => s + (sale.items.find(i => i.productId === a.id)?.qty || 0), 0);
+      const soldB = monthSales.reduce((s, sale) => s + (sale.items.find(i => i.productId === b.id)?.qty || 0), 0);
+      return soldB - soldA;
+    }).slice(0, 5).map(p => ({
+      name: p.name,
+      sold: monthSales.reduce((s, sale) => s + (sale.items.find(i => i.productId === p.id)?.qty || 0), 0),
+      revenue: monthSales.reduce((s, sale) => s + (sale.items.find(i => i.productId === p.id)?.total || 0), 0),
+    })).filter(p => p.sold > 0);
+    const slowMoving = products.filter(p => p.status === 'active' && p.stock > p.minStock * 2).slice(0, 5);
+    const paymentBreakdownFin = ['Cash', 'MTN MoMo', 'Airtel Money', 'Card', 'Split'].map(method => ({
+      method,
+      count: monthSales.filter(s => s.paymentMethod === method).length,
+      amount: monthSales.filter(s => s.paymentMethod === method).reduce((sum, s) => sum + s.total, 0),
+    })).filter(p => p.count > 0);
+    return { totalRevenue, totalRefunds, totalDiscount, cogs, grossProfit, netProfit, inventoryValue, inventoryRetailValue, topSelling, slowMoving, paymentBreakdownFin, transactionCount: monthSales.length };
+  }, [sales, products, financialMonth]);
+
+  const buildFinancialReportHTML = () => {
+    const monthLabel = new Date(financialMonth + '-01').toLocaleDateString('en-UG', { year: 'numeric', month: 'long' });
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"/>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{font-family:Arial,sans-serif;max-width:700px;margin:0 auto;padding:24px;color:#1a1a1a;}
+.header{text-align:center;border-bottom:3px solid #22C55E;padding-bottom:16px;margin-bottom:20px;}
+.brand{font-size:22px;font-weight:900;color:#16A34A;letter-spacing:2px;}
+.section{margin-bottom:20px;}.st{font-size:13px;font-weight:800;color:#16A34A;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #d0f0da;padding-bottom:5px;margin-bottom:10px;}
+table{width:100%;border-collapse:collapse;}th{background:#0A1F0E;color:#22C55E;padding:9px 12px;text-align:left;font-size:12px;}td{padding:8px 12px;border-bottom:1px solid #f0f0f0;font-size:12px;}
+.hi{font-weight:bold;color:#16A34A;}.pos{color:#16A34A;font-weight:bold;}.neg{color:#EF4444;font-weight:bold;}.big{font-size:18px;font-weight:900;}
+.kpi{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px;}
+.kcard{flex:1;min-width:130px;background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;}
+.kval{font-size:17px;font-weight:900;color:#16A34A;}.klbl{font-size:10px;color:#888;margin-top:2px;}
+.footer{text-align:center;font-size:10px;color:#aaa;margin-top:20px;padding-top:10px;border-top:1px dashed #ddd;}
+</style></head><body>
+<div class="header"><div class="brand">HESA GIFT ARENA</div>
+<div style="font-size:16px;font-weight:bold;color:#0A1F0E;margin-top:8px;">MONTHLY FINANCIAL REPORT — ${monthLabel}</div>
+<div style="font-size:11px;color:#666;margin-top:4px;">Generated: ${new Date().toLocaleString('en-UG')} · 0748152333 · hesagiftarena@protonmail.com</div></div>
+<div class="section"><div class="st">Income Statement</div>
+<div class="kpi">
+<div class="kcard"><div class="kval">UGX ${financialData.totalRevenue.toLocaleString()}</div><div class="klbl">Total Revenue</div></div>
+<div class="kcard"><div class="kval" style="color:#E55">${financialData.totalRefunds > 0 ? '-' : ''}UGX ${financialData.totalRefunds.toLocaleString()}</div><div class="klbl">Refunds</div></div>
+<div class="kcard"><div class="kval">UGX ${financialData.cogs.toLocaleString()}</div><div class="klbl">Cost of Goods Sold</div></div>
+<div class="kcard"><div class="kval" class="big ${financialData.netProfit >= 0 ? 'pos' : 'neg'}">UGX ${financialData.netProfit.toLocaleString()}</div><div class="klbl">Net Profit</div></div>
+</div>
+<table><tr><th>Line Item</th><th>Amount (UGX)</th></tr>
+<tr><td>Gross Revenue</td><td class="hi">${financialData.totalRevenue.toLocaleString()}</td></tr>
+<tr><td>Less: Refunds</td><td class="neg">-${financialData.totalRefunds.toLocaleString()}</td></tr>
+<tr><td>Net Revenue</td><td class="hi">${(financialData.totalRevenue - financialData.totalRefunds).toLocaleString()}</td></tr>
+<tr><td>Less: Cost of Goods Sold</td><td class="neg">-${financialData.cogs.toLocaleString()}</td></tr>
+<tr><td>Gross Profit</td><td class="hi">${financialData.grossProfit.toLocaleString()}</td></tr>
+<tr><td>Discounts Given</td><td class="neg">-${financialData.totalDiscount.toLocaleString()}</td></tr>
+<tr><td><strong>Net Profit</strong></td><td class="big ${financialData.netProfit >= 0 ? 'pos' : 'neg'}">${financialData.netProfit.toLocaleString()}</td></tr>
+</table></div>
+<div class="section"><div class="st">Inventory Valuation</div>
+<table><tr><th>Metric</th><th>Value</th></tr>
+<tr><td>Stock at Cost (Buying Price)</td><td class="hi">UGX ${financialData.inventoryValue.toLocaleString()}</td></tr>
+<tr><td>Stock at Retail (Selling Price)</td><td class="hi">UGX ${financialData.inventoryRetailValue.toLocaleString()}</td></tr>
+<tr><td>Potential Profit if All Sold</td><td class="pos">UGX ${(financialData.inventoryRetailValue - financialData.inventoryValue).toLocaleString()}</td></tr>
+<tr><td>Total Active Products</td><td>${products.filter(p => p.status === 'active').length}</td></tr>
+</table></div>
+<div class="section"><div class="st">Top Selling Items</div>
+<table><tr><th>#</th><th>Product</th><th>Units</th><th>Revenue</th></tr>
+${financialData.topSelling.slice(0, 5).map((p, i) => `<tr><td>${i + 1}</td><td>${p.name}</td><td>${p.sold}</td><td class="hi">UGX ${p.revenue.toLocaleString()}</td></tr>`).join('')}
+</table></div>
+<div class="section"><div class="st">Cash Flow — Payment Methods</div>
+<table><tr><th>Method</th><th>Transactions</th><th>Inflow (UGX)</th></tr>
+${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.count}</td><td class="hi">${p.amount.toLocaleString()}</td></tr>`).join('')}
+<tr><td><strong>TOTAL</strong></td><td><strong>${financialData.transactionCount}</strong></td><td class="big pos">${financialData.totalRevenue.toLocaleString()}</td></tr>
+</table></div>
+<div class="footer">HESA GIFT ARENA POS · ${monthLabel} Financial Report · Confidential</div>
+</body></html>`;
+  };
 
   const paymentBreakdown = [
     { method: 'Cash', pct: 38, amount: Math.round(stats.revenue * 0.38), color: Colors.success },
@@ -388,15 +477,51 @@ export default function ReportsScreen() {
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scroll, isDesktop && { maxWidth: 1200, alignSelf: 'center', width: '100%' }]}>
         {/* Period Toggle */}
         <View style={styles.periodToggle}>
-          {([{ key: 'today', label: 'Today' }, { key: 'week', label: 'This Week' }, { key: 'month', label: 'This Month' }] as { key: Period; label: string }[]).map(p => (
+          {([{ key: 'today', label: 'Today' }, { key: 'week', label: 'This Week' }, { key: 'month', label: 'This Month' }, { key: 'financial', label: 'Financial' }] as { key: Period; label: string }[]).map(p => (
             <TouchableOpacity key={p.key} style={[styles.periodBtn, period === p.key && styles.periodBtnActive]} onPress={() => setPeriod(p.key)}>
               <Text style={[styles.periodBtnText, period === p.key && styles.periodBtnTextActive]}>{p.label}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
+        {/* Financial Report Period */}
+        {period === 'financial' && (
+          <View style={styles.financialMonthRow}>
+            <TouchableOpacity style={styles.financialMonthBtn} onPress={() => {
+              const d = new Date(financialMonth + '-01');
+              d.setMonth(d.getMonth() - 1);
+              setFinancialMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-left" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <Text style={styles.financialMonthLabel}>
+              {new Date(financialMonth + '-01').toLocaleDateString('en-UG', { year: 'numeric', month: 'long' })}
+            </Text>
+            <TouchableOpacity style={styles.financialMonthBtn} onPress={() => {
+              const d = new Date(financialMonth + '-01');
+              d.setMonth(d.getMonth() + 1);
+              setFinancialMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-right" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.eodBtn} onPress={async () => {
+              try {
+                setGeneratingEOD(true);
+                const { uri } = await Print.printToFileAsync({ html: buildFinancialReportHTML() });
+                const ok = await Sharing.isAvailableAsync();
+                if (ok) await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Financial Report ${financialMonth}` });
+              } catch { showAlert('Error', 'Could not generate report.'); }
+              finally { setGeneratingEOD(false); }
+            }} disabled={generatingEOD}>
+              {generatingEOD ? <ActivityIndicator size="small" color={Colors.gold} /> : <MaterialIcons name="share" size={15} color={Colors.gold} />}
+              <Text style={styles.eodBtnText}>Export</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
         {/* KPI Cards */}
-        <View style={styles.kpiRow}>
+        {period !== 'financial' && (
+          <View style={styles.kpiRow}>
           {[
             { label: 'Total Revenue', value: formatUGX(stats.revenue), icon: 'attach-money', color: Colors.gold, bg: Colors.goldMuted },
             { label: 'Transactions', value: String(stats.transactions), icon: 'receipt-long', color: Colors.skyBlue, bg: Colors.skyBlueMuted },
@@ -410,7 +535,126 @@ export default function ReportsScreen() {
           ))}
         </View>
 
-        {/* Desktop: 2-column layout, Mobile: single column */}
+        )}
+        {period === 'financial' && (
+          <View style={styles.financialSection}>
+            {/* Income Statement Cards */}
+            <View style={styles.financialCardRow}>
+              {[
+                { label: 'Total Revenue', value: formatUGX(financialData.totalRevenue), color: Colors.gold, icon: 'attach-money' },
+                { label: 'COGS', value: formatUGX(financialData.cogs), color: Colors.warning, icon: 'shopping-basket' },
+                { label: 'Gross Profit', value: formatUGX(financialData.grossProfit), color: Colors.skyBlue, icon: 'trending-up' },
+                { label: 'Net Profit', value: formatUGX(financialData.netProfit), color: financialData.netProfit >= 0 ? Colors.success : Colors.danger, icon: 'account-balance' },
+              ].map(k => (
+                <View key={k.label} style={[styles.finCard, { borderColor: k.color + '30' }]}>
+                  <MaterialIcons name={k.icon as any} size={18} color={k.color} />
+                  <Text style={[styles.finCardValue, { color: k.color }]}>{k.value}</Text>
+                  <Text style={styles.finCardLabel}>{k.label}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Income Statement Table */}
+            <View style={styles.finTable}>
+              <View style={styles.finTableHeader}>
+                <MaterialIcons name="receipt-long" size={14} color={Colors.gold} />
+                <Text style={styles.finTableTitle}>Income Statement</Text>
+              </View>
+              {[
+                { label: 'Gross Revenue', value: financialData.totalRevenue, pos: true },
+                { label: 'Less: Refunds', value: -financialData.totalRefunds, pos: financialData.totalRefunds === 0 },
+                { label: 'Net Revenue', value: financialData.totalRevenue - financialData.totalRefunds, pos: true, bold: true },
+                { label: 'Less: Cost of Goods', value: -financialData.cogs, pos: false },
+                { label: 'Gross Profit', value: financialData.grossProfit, pos: financialData.grossProfit >= 0, bold: true },
+                { label: 'Less: Discounts', value: -financialData.totalDiscount, pos: false },
+                { label: 'Net Profit', value: financialData.netProfit, pos: financialData.netProfit >= 0, bold: true, large: true },
+              ].map((row, i) => (
+                <View key={i} style={[styles.finTableRow, row.bold && styles.finTableRowBold, row.large && styles.finTableRowLarge]}>
+                  <Text style={[styles.finTableLabel, row.bold && { color: Colors.textPrimary, fontWeight: Typography.bold }]}>{row.label}</Text>
+                  <Text style={[styles.finTableValue, { color: row.pos ? Colors.success : Colors.danger }, row.large && { fontSize: Typography.lg }]}>
+                    {row.value < 0 ? '-' : ''}{formatUGX(Math.abs(row.value))}
+                  </Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Inventory Valuation */}
+            <View style={styles.finTable}>
+              <View style={styles.finTableHeader}>
+                <MaterialIcons name="inventory" size={14} color={Colors.skyBlue} />
+                <Text style={[styles.finTableTitle, { color: Colors.skyBlue }]}>Inventory Valuation</Text>
+              </View>
+              {[
+                { label: 'Stock at Cost (Buying Price)', value: financialData.inventoryValue },
+                { label: 'Stock at Retail (Selling Price)', value: financialData.inventoryRetailValue },
+                { label: 'Potential Profit if All Sold', value: financialData.inventoryRetailValue - financialData.inventoryValue },
+              ].map((row, i) => (
+                <View key={i} style={styles.finTableRow}>
+                  <Text style={styles.finTableLabel}>{row.label}</Text>
+                  <Text style={[styles.finTableValue, { color: Colors.gold }]}>{formatUGX(row.value)}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Top Selling */}
+            <View style={styles.finTable}>
+              <View style={styles.finTableHeader}>
+                <MaterialIcons name="star" size={14} color={Colors.gold} />
+                <Text style={styles.finTableTitle}>Top Selling Items</Text>
+              </View>
+              {financialData.topSelling.length === 0 ? (
+                <Text style={styles.finEmptyText}>No sales data for {financialMonth}</Text>
+              ) : financialData.topSelling.map((p, i) => (
+                <View key={i} style={styles.finProductRow}>
+                  <View style={[styles.finRank, { backgroundColor: i === 0 ? Colors.gold : i === 1 ? '#A8A8A8' : Colors.navyLight }]}>
+                    <Text style={[styles.finRankText, { color: i < 2 ? Colors.navy : Colors.textMuted }]}>#{i + 1}</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.finProductName} numberOfLines={1}>{p.name}</Text>
+                    <Text style={styles.finProductSold}>{p.sold} units sold</Text>
+                  </View>
+                  <Text style={styles.finProductRevenue}>{formatUGX(p.revenue)}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* Slow Moving */}
+            {financialData.slowMoving.length > 0 && (
+              <View style={[styles.finTable, { borderColor: Colors.warning + '40' }]}>
+                <View style={styles.finTableHeader}>
+                  <MaterialIcons name="warning" size={14} color={Colors.warning} />
+                  <Text style={[styles.finTableTitle, { color: Colors.warning }]}>Slow Moving Items</Text>
+                </View>
+                {financialData.slowMoving.map(p => (
+                  <View key={p.id} style={styles.finTableRow}>
+                    <Text style={styles.finTableLabel} numberOfLines={1}>{p.name}</Text>
+                    <View style={{ alignItems: 'flex-end' }}>
+                      <Text style={[styles.finTableValue, { color: Colors.warning }]}>{p.stock} in stock</Text>
+                      <Text style={{ fontSize: 10, color: Colors.textMuted }}>{formatUGX(p.price * p.stock)} retail value</Text>
+                    </View>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {/* Cash Flow by Payment */}
+            <View style={styles.finTable}>
+              <View style={styles.finTableHeader}>
+                <MaterialIcons name="account-balance-wallet" size={14} color={Colors.success} />
+                <Text style={[styles.finTableTitle, { color: Colors.success }]}>Cash Flow — Payment Methods</Text>
+              </View>
+              {financialData.paymentBreakdownFin.map(pm => (
+                <View key={pm.method} style={styles.finTableRow}>
+                  <Text style={styles.finTableLabel}>{pm.method}</Text>
+                  <View style={{ alignItems: 'flex-end' }}>
+                    <Text style={[styles.finTableValue, { color: Colors.success }]}>{formatUGX(pm.amount)}</Text>
+                    <Text style={{ fontSize: 10, color: Colors.textMuted }}>{pm.count} transactions</Text>
+                  </View>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
         {isDesktop ? renderDesktopLayout() : (
           <>
             {renderCharts()}
@@ -723,4 +967,28 @@ const styles = StyleSheet.create({
   eodActions: { flexDirection: 'row', gap: 12, padding: Spacing.xl, borderTopWidth: 1, borderTopColor: Colors.divider },
   eodActionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: BorderRadius.md, borderWidth: 1 },
   eodActionText: { fontSize: Typography.base, fontWeight: Typography.bold },
+  // Financial Report
+  financialMonthRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.borderGold, paddingHorizontal: Spacing.md, paddingVertical: 8 },
+  financialMonthBtn: { padding: 4 },
+  financialMonthLabel: { flex: 1, textAlign: 'center', fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary },
+  financialSection: { gap: Spacing.md },
+  financialCardRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  finCard: { flex: 1, minWidth: '45%', backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, padding: Spacing.md, alignItems: 'center', gap: 4 },
+  finCardValue: { fontSize: 13, fontWeight: Typography.extrabold, textAlign: 'center' },
+  finCardLabel: { fontSize: 10, color: Colors.textMuted, textAlign: 'center' },
+  finTable: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, overflow: 'hidden' },
+  finTableHeader: { flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: Colors.navyLight, paddingHorizontal: Spacing.base, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  finTableTitle: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
+  finTableRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: Spacing.base, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  finTableRowBold: { backgroundColor: Colors.goldSubtle },
+  finTableRowLarge: { backgroundColor: Colors.goldSubtle, paddingVertical: 14 },
+  finTableLabel: { fontSize: Typography.sm, color: Colors.textSecondary, flex: 1 },
+  finTableValue: { fontSize: Typography.sm, fontWeight: Typography.semibold },
+  finEmptyText: { fontSize: Typography.sm, color: Colors.textMuted, padding: Spacing.base, textAlign: 'center' },
+  finProductRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: Spacing.base, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  finRank: { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  finRankText: { fontSize: 11, fontWeight: Typography.extrabold },
+  finProductName: { fontSize: Typography.sm, fontWeight: Typography.medium, color: Colors.textPrimary },
+  finProductSold: { fontSize: Typography.xs, color: Colors.textMuted },
+  finProductRevenue: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
 });

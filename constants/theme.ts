@@ -1,48 +1,52 @@
 // HESA GIFT ARENA POS - Design System
-// Luxury Navy + Sky Blue + Gold palette
+// Fresh Green + White palette — brand refresh 2026
 
 export const Colors = {
-  // Brand Core
-  navy: '#0A1628',
-  navyMid: '#0F1F3D',
-  navyLight: '#152847',
-  navyCard: '#1A3055',
+  // Brand Core — Dark green backgrounds
+  navy: '#0A1F0E',
+  navyMid: '#0D2613',
+  navyLight: '#122C17',
+  navyCard: '#163520',
 
-  // Sky Blue
+  // White / Light
+  white: '#FFFFFF',
+  offWhite: '#F4FAF5',
+
+  // Sky Blue (accent — kept for payment badges)
   skyBlue: '#38B6FF',
   skyBlueDark: '#1A9FE8',
   skyBlueLight: '#6DCEFF',
   skyBlueMuted: 'rgba(56, 182, 255, 0.15)',
 
-  // Gold
-  gold: '#D4AF37',
-  goldBright: '#FFD700',
-  goldDark: '#B8922E',
-  goldMuted: 'rgba(212, 175, 55, 0.15)',
-  goldSubtle: 'rgba(212, 175, 55, 0.08)',
+  // Primary Green (replaces gold)
+  gold: '#22C55E',
+  goldBright: '#4ADE80',
+  goldDark: '#16A34A',
+  goldMuted: 'rgba(34, 197, 94, 0.15)',
+  goldSubtle: 'rgba(34, 197, 94, 0.07)',
 
   // Text
   textPrimary: '#FFFFFF',
-  textSecondary: '#A8BFCC',
-  textMuted: '#6B8299',
-  textGold: '#D4AF37',
-  textNavy: '#0A1628',
+  textSecondary: '#A3C4A8',
+  textMuted: '#5A8A65',
+  textGold: '#22C55E',
+  textNavy: '#0A1F0E',
 
   // UI Elements
-  surface: '#0F1F3D',
-  surfaceElevated: '#152847',
-  surfaceCard: '#1A3055',
-  border: 'rgba(56, 182, 255, 0.15)',
-  borderGold: 'rgba(212, 175, 55, 0.25)',
-  divider: 'rgba(168, 191, 204, 0.1)',
+  surface: '#0D2613',
+  surfaceElevated: '#122C17',
+  surfaceCard: '#163520',
+  border: 'rgba(34, 197, 94, 0.15)',
+  borderGold: 'rgba(34, 197, 94, 0.28)',
+  divider: 'rgba(163, 196, 168, 0.1)',
 
   // Semantic
-  success: '#2ECC71',
-  successMuted: 'rgba(46, 204, 113, 0.15)',
-  warning: '#F39C12',
-  warningMuted: 'rgba(243, 156, 18, 0.15)',
-  danger: '#E74C3C',
-  dangerMuted: 'rgba(231, 76, 60, 0.15)',
+  success: '#22C55E',
+  successMuted: 'rgba(34, 197, 94, 0.15)',
+  warning: '#F59E0B',
+  warningMuted: 'rgba(245, 158, 11, 0.15)',
+  danger: '#EF4444',
+  dangerMuted: 'rgba(239, 68, 68, 0.15)',
   info: '#38B6FF',
   infoMuted: 'rgba(56, 182, 255, 0.15)',
 
@@ -50,12 +54,12 @@ export const Colors = {
   mtn: '#FFCC00',
   mtnDark: '#E6B800',
   airtel: '#E8001E',
-  cash: '#2ECC71',
+  cash: '#22C55E',
   card: '#38B6FF',
 
   // Overlay
-  overlay: 'rgba(10, 22, 40, 0.85)',
-  overlayLight: 'rgba(10, 22, 40, 0.5)',
+  overlay: 'rgba(10, 31, 14, 0.88)',
+  overlayLight: 'rgba(10, 31, 14, 0.5)',
 };
 
 export const Typography = {
@@ -130,7 +134,7 @@ export const Shadows = {
     elevation: 10,
   },
   gold: {
-    shadowColor: '#D4AF37',
+    shadowColor: '#22C55E',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 12,

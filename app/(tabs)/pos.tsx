@@ -472,7 +472,7 @@ export default function POSScreen() {
       <div class="logo-circle"><div class="logo-inner"><div class="logo-text">HGA</div></div></div>
       <div class="brand">HESA GIFT ARENA</div>
       <div class="slogan">"Where Every Gift Tells a Beautiful Story."</div>
-      <div class="addr">${sale.branchName || 'Kampala Road, Kampala'} · +256 700 000 001</div>
+      <div class="addr">${sale.branchName || 'Kampala Road, Kampala'} · 0748152333</div>
       <div class="receipt-badge">SALES RECEIPT</div>
     </div>
     <hr class="divider-solid"/>

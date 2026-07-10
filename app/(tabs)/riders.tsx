@@ -148,7 +148,6 @@ export default function RidersScreen() {
   const [riderPhone, setRiderPhone] = useState('');
   const [riderPin, setRiderPin] = useState('');
   const [savingRider, setSavingRider] = useState(false);
-  const mapRef = useRef<any>(null);
 
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState('');
@@ -162,7 +161,7 @@ export default function RidersScreen() {
   const [selectedTrackingRider, setSelectedTrackingRider] = useState<string | null>(null);
   const [loadingLocations, setLoadingLocations] = useState(false);
   const locationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const mapRef = useRef<MapView>(null);
+  const mapRef = useRef<any>(null);
 
   const [showDeliveryDetail, setShowDeliveryDetail] = useState<RiderDelivery | null>(null);
   const [showOTPVerify, setShowOTPVerify] = useState(false);

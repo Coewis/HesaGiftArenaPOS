@@ -9,6 +9,8 @@ import { MaterialIcons } from '@expo/vector-icons';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import * as ImagePicker from 'expo-image-picker';
+import * as DocumentPicker from 'expo-document-picker';
+import * as FileSystem from 'expo-file-system';
 import { usePOS } from '@/hooks/usePOS';
 import { useAuth } from '@/hooks/useAuth';
 import { useAlert } from '@/template';
@@ -20,6 +22,26 @@ const { width } = Dimensions.get('window');
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
 
 type TabMode = 'products' | 'bundles';
+
+// ─── CSV Import Types ───────────────────────────────────────────────────────
+interface CSVRow {
+  name: string;
+  barcode: string;
+  price: string;
+  stock: string;
+  category: string;
+}
+interface ParsedImportRow {
+  raw: CSVRow;
+  name: string;
+  barcode: string;
+  price: number;
+  stock: number;
+  category: string;
+  errors: string[];
+  isDuplicate: boolean;
+  selected: boolean;
+}
 
 export default function ProductsScreen() {
   const insets = useSafeAreaInsets();
@@ -48,6 +70,14 @@ export default function ProductsScreen() {
   const [uploadingImage, setUploadingImage] = useState(false);
 
   // Bundle state
+  // CSV Import state
+  const [showCSVModal, setShowCSVModal] = useState(false);
+  const [csvRows, setCSVRows] = useState<ParsedImportRow[]>([]);
+  const [csvFileName, setCSVFileName] = useState('');
+  const [importingCSV, setImportingCSV] = useState(false);
+  const [csvImportDone, setCSVImportDone] = useState(false);
+  const [csvImportResults, setCSVImportResults] = useState({ success: 0, skipped: 0 });
+
   const [showBundleModal, setShowBundleModal] = useState(false);
   const [editBundle, setEditBundle] = useState<ProductBundle | null>(null);
   const [bundleName, setBundleName] = useState('');
@@ -57,6 +87,133 @@ export default function ProductsScreen() {
   const [bundleImageUrl, setBundleImageUrl] = useState('');
   const [showComponentPicker, setShowComponentPicker] = useState(false);
   const [componentSearch, setComponentSearch] = useState('');
+
+  // ─── CSV Import Logic ────────────────────────────────────────────────────
+  const parseCategoryFromString = (catStr: string): string => {
+    const normalized = catStr.toLowerCase().trim();
+    const catMap: Record<string, string> = {
+      'bouquet': 'cat_bouquets', 'bouquets': 'cat_bouquets', 'roses': 'cat_bouquets',
+      'gift': 'cat_gifts', 'gifts': 'cat_gifts', 'gift box': 'cat_gifts',
+      'balloon': 'cat_balloons', 'balloons': 'cat_balloons',
+      'hamper': 'cat_hampers', 'hampers': 'cat_hampers', 'basket': 'cat_hampers',
+      'card': 'cat_cards', 'cards': 'cat_cards', 'greeting': 'cat_cards',
+      'chocolate': 'cat_chocolates', 'chocolates': 'cat_chocolates', 'candy': 'cat_chocolates',
+      'teddy': 'cat_teddies', 'teddies': 'cat_teddies', 'stuffed': 'cat_teddies',
+      'custom': 'cat_custom', 'personalized': 'cat_custom',
+    };
+    for (const key of Object.keys(catMap)) {
+      if (normalized.includes(key)) return catMap[key];
+    }
+    const matchedCat = MOCK_CATEGORIES.find(c => c.name.toLowerCase().includes(normalized) || normalized.includes(c.name.toLowerCase()));
+    return matchedCat?.id || 'cat_gifts';
+  };
+
+  const parseCSVContent = (text: string, existingBarcodes: Set<string>): ParsedImportRow[] => {
+    const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) return [];
+
+    // Detect header row
+    const header = lines[0].split(',').map(h => h.replace(/["']/g, '').toLowerCase().trim());
+    const nameIdx = header.findIndex(h => ['name', 'product name', 'product'].includes(h));
+    const barcodeIdx = header.findIndex(h => ['barcode', 'sku', 'code', 'product code'].includes(h));
+    const priceIdx = header.findIndex(h => ['price', 'selling price', 'cost'].includes(h));
+    const stockIdx = header.findIndex(h => ['stock', 'quantity', 'qty', 'units'].includes(h));
+    const categoryIdx = header.findIndex(h => ['category', 'type', 'group'].includes(h));
+
+    return lines.slice(1).map((line, idx) => {
+      // Handle quoted CSVs
+      const cols = line.match(/(?:"[^"]*"|[^,])+/g) || [];
+      const get = (i: number) => (cols[i] || '').replace(/^["']|["']$/g, '').trim();
+
+      const raw: CSVRow = {
+        name: nameIdx >= 0 ? get(nameIdx) : get(0),
+        barcode: barcodeIdx >= 0 ? get(barcodeIdx) : get(1),
+        price: priceIdx >= 0 ? get(priceIdx) : get(2),
+        stock: stockIdx >= 0 ? get(stockIdx) : get(3),
+        category: categoryIdx >= 0 ? get(categoryIdx) : get(4),
+      };
+
+      const errors: string[] = [];
+      if (!raw.name) errors.push('Name required');
+      const price = parseFloat(raw.price.replace(/[^\d.]/g, ''));
+      if (isNaN(price) || price <= 0) errors.push('Invalid price');
+      const stock = parseInt(raw.stock.replace(/[^\d]/g, ''));
+      if (isNaN(stock) || stock < 0) errors.push('Invalid stock');
+
+      const barcode = raw.barcode || `HGA${Date.now().toString().slice(-4)}${idx}`;
+      const isDuplicate = existingBarcodes.has(barcode);
+
+      return {
+        raw,
+        name: raw.name,
+        barcode,
+        price: isNaN(price) ? 0 : price,
+        stock: isNaN(stock) ? 0 : stock,
+        category: parseCategoryFromString(raw.category),
+        errors,
+        isDuplicate,
+        selected: errors.length === 0 && !isDuplicate,
+      };
+    }).filter(r => r.name);
+  };
+
+  const handlePickCSV = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['text/csv', 'text/comma-separated-values', 'application/csv', 'text/plain', '*/*'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      const content = await FileSystem.readAsStringAsync(asset.uri);
+      const existingBarcodes = new Set(products.map(p => p.barcode));
+      const rows = parseCSVContent(content, existingBarcodes);
+
+      if (rows.length === 0) {
+        showAlert('Invalid CSV', 'No valid rows found. Ensure your CSV has: name, barcode, price, stock, category columns.');
+        return;
+      }
+
+      setCSVRows(rows);
+      setCSVFileName(asset.name || 'import.csv');
+      setCSVImportDone(false);
+      setCSVImportResults({ success: 0, skipped: 0 });
+      setShowCSVModal(true);
+    } catch {
+      showAlert('Error', 'Could not read file. Please select a valid CSV file.');
+    }
+  };
+
+  const handleConfirmImport = async () => {
+    const toImport = csvRows.filter(r => r.selected && r.errors.length === 0 && !r.isDuplicate);
+    if (toImport.length === 0) { showAlert('Nothing to Import', 'Select valid rows to import.'); return; }
+    setImportingCSV(true);
+    let success = 0;
+    let skipped = 0;
+    for (const row of toImport) {
+      try {
+        await addProduct({
+          id: `prod_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          barcode: row.barcode,
+          name: row.name,
+          price: row.price,
+          buyingPrice: Math.round(row.price * 0.65),
+          stock: row.stock,
+          minStock: Math.max(3, Math.round(row.stock * 0.1)),
+          category: row.category,
+          description: '',
+          supplier: '',
+          status: 'active',
+          imageUrl: 'https://images.unsplash.com/photo-1513475382585-d06e58bcb0e0?w=400',
+        });
+        success++;
+      } catch { skipped++; }
+    }
+    setCSVImportResults({ success, skipped });
+    setCSVImportDone(true);
+    setImportingCSV(false);
+  };
 
   const lowStockProducts = useMemo(() => getLowStockProducts(), [products]);
 
@@ -312,6 +469,8 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
     return active.filter(p => p.name.toLowerCase().includes(componentSearch.toLowerCase()));
   }, [products, componentSearch]);
 
+  const validSelectedCount = csvRows.filter(r => r.selected && r.errors.length === 0 && !r.isDuplicate).length;
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
@@ -320,6 +479,12 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
           <Text style={styles.headerSub}>{products.filter(p => p.status === 'active').length} active · {lowStockProducts.length} low stock · {bundles.filter(b => b.status === 'active').length} bundles</Text>
         </View>
         <View style={styles.headerBtns}>
+          {tabMode === 'products' && hasPermission('products') && (
+            <TouchableOpacity style={[styles.addBtn, { backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.borderGold }]} onPress={handlePickCSV}>
+              <MaterialIcons name="upload-file" size={16} color={Colors.gold} />
+              <Text style={[styles.addBtnText, { color: Colors.gold }]}>CSV</Text>
+            </TouchableOpacity>
+          )}
           {tabMode === 'products' && hasPermission('products') && (
             <TouchableOpacity style={styles.addBtn} onPress={openAddModal}>
               <MaterialIcons name="add" size={18} color={Colors.navy} />
@@ -556,6 +721,141 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
                 <Text style={styles.saveBtnText}>{editProduct ? 'Update' : 'Add Product'}</Text>
               </TouchableOpacity>
             </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* ─── CSV Import Modal ─────────────────────────────────────────────── */}
+      <Modal visible={showCSVModal} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modal, { maxHeight: '92%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="upload-file" size={22} color={Colors.gold} />
+                <View>
+                  <Text style={styles.modalTitle}>CSV Import</Text>
+                  <Text style={{ fontSize: Typography.xs, color: Colors.textMuted }}>{csvFileName}</Text>
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setShowCSVModal(false)}>
+                <MaterialIcons name="close" size={22} color={Colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+
+            {csvImportDone ? (
+              <View style={styles.csvImportSuccess}>
+                <MaterialIcons name="check-circle" size={64} color={Colors.success} />
+                <Text style={styles.csvSuccessTitle}>Import Complete!</Text>
+                <Text style={styles.csvSuccessSub}>{csvImportResults.success} products added successfully</Text>
+                {csvImportResults.skipped > 0 && (
+                  <Text style={{ fontSize: Typography.xs, color: Colors.warning }}>{csvImportResults.skipped} rows failed</Text>
+                )}
+                <TouchableOpacity style={styles.csvDoneBtn} onPress={() => setShowCSVModal(false)}>
+                  <MaterialIcons name="check" size={18} color={Colors.navy} />
+                  <Text style={styles.csvDoneBtnText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              <>
+                {/* Summary Banner */}
+                <View style={styles.csvSummaryRow}>
+                  <View style={[styles.csvSummaryChip, { borderColor: Colors.success + '40' }]}>
+                    <Text style={[styles.csvSummaryValue, { color: Colors.success }]}>{csvRows.filter(r => r.errors.length === 0 && !r.isDuplicate).length}</Text>
+                    <Text style={styles.csvSummaryLabel}>Valid</Text>
+                  </View>
+                  <View style={[styles.csvSummaryChip, { borderColor: Colors.danger + '40' }]}>
+                    <Text style={[styles.csvSummaryValue, { color: Colors.danger }]}>{csvRows.filter(r => r.errors.length > 0).length}</Text>
+                    <Text style={styles.csvSummaryLabel}>Errors</Text>
+                  </View>
+                  <View style={[styles.csvSummaryChip, { borderColor: Colors.warning + '40' }]}>
+                    <Text style={[styles.csvSummaryValue, { color: Colors.warning }]}>{csvRows.filter(r => r.isDuplicate).length}</Text>
+                    <Text style={styles.csvSummaryLabel}>Duplicates</Text>
+                  </View>
+                  <View style={[styles.csvSummaryChip, { borderColor: Colors.skyBlue + '40' }]}>
+                    <Text style={[styles.csvSummaryValue, { color: Colors.skyBlue }]}>{csvRows.length}</Text>
+                    <Text style={styles.csvSummaryLabel}>Total</Text>
+                  </View>
+                </View>
+
+                {/* Table Header */}
+                <View style={styles.csvTableHeader}>
+                  <Text style={[styles.csvTh, { flex: 2 }]}>NAME</Text>
+                  <Text style={[styles.csvTh, { flex: 1 }]}>BARCODE</Text>
+                  <Text style={[styles.csvTh, { width: 80, textAlign: 'right' }]}>PRICE</Text>
+                  <Text style={[styles.csvTh, { width: 50, textAlign: 'center' }]}>QTY</Text>
+                  <Text style={[styles.csvTh, { width: 44, textAlign: 'center' }]}>SEL</Text>
+                </View>
+
+                <ScrollView showsVerticalScrollIndicator={false} style={{ flex: 1 }}>
+                  {csvRows.map((row, idx) => {
+                    const hasErrors = row.errors.length > 0;
+                    const rowColor = hasErrors ? Colors.danger : row.isDuplicate ? Colors.warning : Colors.success;
+                    return (
+                      <TouchableOpacity
+                        key={idx}
+                        style={[
+                          styles.csvTableRow,
+                          { borderLeftColor: rowColor, borderLeftWidth: 3 },
+                          !row.selected && { opacity: 0.5 },
+                        ]}
+                        onPress={() => {
+                          if (!hasErrors && !row.isDuplicate) {
+                            setCSVRows(prev => prev.map((r, i) => i === idx ? { ...r, selected: !r.selected } : r));
+                          }
+                        }}
+                        disabled={hasErrors || row.isDuplicate}
+                      >
+                        <View style={{ flex: 2 }}>
+                          <Text style={styles.csvCellName} numberOfLines={1}>{row.name || '—'}</Text>
+                          <Text style={styles.csvCellCat}>{MOCK_CATEGORIES.find(c => c.id === row.category)?.name || row.raw.category}</Text>
+                          {hasErrors && <Text style={styles.csvCellError}>{row.errors.join(', ')}</Text>}
+                          {row.isDuplicate && <Text style={[styles.csvCellError, { color: Colors.warning }]}>Duplicate barcode</Text>}
+                        </View>
+                        <Text style={[styles.csvCellText, { flex: 1 }]} numberOfLines={1}>{row.barcode}</Text>
+                        <Text style={[styles.csvCellText, { width: 80, textAlign: 'right', color: Colors.gold }]}>{formatUGX(row.price)}</Text>
+                        <Text style={[styles.csvCellText, { width: 50, textAlign: 'center' }]}>{row.stock}</Text>
+                        <View style={{ width: 44, alignItems: 'center' }}>
+                          {hasErrors || row.isDuplicate
+                            ? <MaterialIcons name={hasErrors ? 'error' : 'warning'} size={16} color={rowColor} />
+                            : <MaterialIcons name={row.selected ? 'check-box' : 'check-box-outline-blank'} size={18} color={row.selected ? Colors.success : Colors.textMuted} />
+                          }
+                        </View>
+                      </TouchableOpacity>
+                    );
+                  })}
+                </ScrollView>
+
+                <View style={styles.csvFooter}>
+                  <View style={styles.csvSelectRow}>
+                    <TouchableOpacity
+                      style={styles.csvSelectAllBtn}
+                      onPress={() => setCSVRows(prev => prev.map(r => r.errors.length === 0 && !r.isDuplicate ? { ...r, selected: true } : r))}
+                    >
+                      <Text style={styles.csvSelectAllText}>Select All Valid</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[styles.csvSelectAllBtn, { borderColor: Colors.danger + '40' }]}
+                      onPress={() => setCSVRows(prev => prev.map(r => ({ ...r, selected: false })))}
+                    >
+                      <Text style={[styles.csvSelectAllText, { color: Colors.danger }]}>Deselect All</Text>
+                    </TouchableOpacity>
+                  </View>
+                  <TouchableOpacity
+                    style={[styles.csvImportBtn, (importingCSV || validSelectedCount === 0) && { opacity: 0.5 }]}
+                    onPress={handleConfirmImport}
+                    disabled={importingCSV || validSelectedCount === 0}
+                  >
+                    {importingCSV
+                      ? <ActivityIndicator color={Colors.navy} size="small" />
+                      : <MaterialIcons name="upload" size={18} color={Colors.navy} />
+                    }
+                    <Text style={styles.csvImportBtnText}>
+                      {importingCSV ? 'Importing...' : `Import ${validSelectedCount} Product${validSelectedCount !== 1 ? 's' : ''}`}
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         </View>
       </Modal>
@@ -807,4 +1107,27 @@ const styles = StyleSheet.create({
   inBundleBadge: { backgroundColor: Colors.goldMuted, paddingHorizontal: 8, paddingVertical: 4, borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.borderGold },
   inBundleBadgeText: { fontSize: 11, fontWeight: Typography.bold, color: Colors.gold },
   addCompBadge: { width: 32, height: 32, borderRadius: 16, backgroundColor: Colors.gold, alignItems: 'center', justifyContent: 'center' },
+  // CSV Import
+  csvSummaryRow: { flexDirection: 'row', gap: 8, paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  csvSummaryChip: { flex: 1, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, padding: Spacing.sm, alignItems: 'center', gap: 2 },
+  csvSummaryValue: { fontSize: Typography.lg, fontWeight: Typography.extrabold },
+  csvSummaryLabel: { fontSize: 10, color: Colors.textMuted },
+  csvTableHeader: { flexDirection: 'row', alignItems: 'center', backgroundColor: Colors.navyLight, paddingHorizontal: Spacing.md, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  csvTh: { fontSize: 10, fontWeight: Typography.bold, color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  csvTableRow: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.md, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider, gap: 6 },
+  csvCellName: { fontSize: Typography.xs, fontWeight: Typography.semibold, color: Colors.textPrimary },
+  csvCellCat: { fontSize: 10, color: Colors.textMuted, marginTop: 1 },
+  csvCellError: { fontSize: 10, color: Colors.danger, marginTop: 2 },
+  csvCellText: { fontSize: Typography.xs, color: Colors.textSecondary },
+  csvFooter: { padding: Spacing.md, gap: 10, borderTopWidth: 1, borderTopColor: Colors.divider },
+  csvSelectRow: { flexDirection: 'row', gap: 10 },
+  csvSelectAllBtn: { flex: 1, paddingVertical: 8, borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.success + '40', alignItems: 'center', backgroundColor: Colors.successMuted },
+  csvSelectAllText: { fontSize: Typography.xs, fontWeight: Typography.semibold, color: Colors.success },
+  csvImportBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, backgroundColor: Colors.gold, borderRadius: BorderRadius.md, paddingVertical: 14, ...Shadows.gold },
+  csvImportBtnText: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.navy },
+  csvImportSuccess: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: Spacing.md, padding: Spacing.xxl },
+  csvSuccessTitle: { fontSize: Typography.xxl, fontWeight: Typography.extrabold, color: Colors.success },
+  csvSuccessSub: { fontSize: Typography.base, color: Colors.textSecondary, textAlign: 'center' },
+  csvDoneBtn: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.gold, paddingHorizontal: 32, paddingVertical: 14, borderRadius: BorderRadius.md, marginTop: 8, ...Shadows.gold },
+  csvDoneBtnText: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.navy },
 });

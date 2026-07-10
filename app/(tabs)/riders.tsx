@@ -1,7 +1,7 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
+import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  FlatList, Modal, TextInput, ActivityIndicator, Dimensions,
+  FlatList, Modal, TextInput, ActivityIndicator, Dimensions, Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -9,17 +9,39 @@ import { MaterialIcons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import * as Location from 'expo-location';
+import RiderMapRenderer from '@/components/RiderMapRenderer';
 import { getSupabaseClient } from '@/template';
 import { usePOS } from '@/hooks/usePOS';
 import { useAuth } from '@/hooks/useAuth';
 import { useBranch } from '@/hooks/useBranch';
 import { useAlert } from '@/template';
 import { Colors, Typography, Spacing, BorderRadius, Shadows } from '@/constants/theme';
+import { FunctionsHttpError } from '@supabase/supabase-js';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const isDesktop = SCREEN_WIDTH >= 1024;
 const isTablet = SCREEN_WIDTH >= 768;
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
+
+// ─── Distance & ETA helpers ─────────────────────────────────────────────────
+function haversineKm(lat1: number, lng1: number, lat2: number, lng2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLng = ((lng2 - lng1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function estimateETA(distKm: number): string {
+  const speedKph = 25; // avg urban delivery speed
+  const minutes = Math.round((distKm / speedKph) * 60);
+  if (minutes < 1) return 'Arriving now';
+  if (minutes < 60) return `~${minutes} min`;
+  return `~${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 interface Rider {
@@ -56,6 +78,17 @@ interface RiderDelivery {
   total?: number;
 }
 
+interface RiderLocation {
+  id: string;
+  rider_id: string;
+  delivery_id?: string;
+  lat: number;
+  lng: number;
+  heading?: number;
+  speed?: number;
+  updated_at: string;
+}
+
 interface RiderEarning {
   id: string;
   rider_id: string;
@@ -68,7 +101,7 @@ interface RiderEarning {
 }
 
 type DeliveryStatus = 'assigned' | 'accepted' | 'picked_up' | 'in_transit' | 'delivered' | 'failed';
-type TabMode = 'deliveries' | 'riders' | 'earnings';
+type TabMode = 'deliveries' | 'riders' | 'earnings' | 'tracking';
 
 const STATUS_CONFIG: Record<DeliveryStatus, { label: string; color: string; icon: string }> = {
   assigned:   { label: 'Assigned',    color: Colors.skyBlue,   icon: 'assignment-ind' },
@@ -115,6 +148,7 @@ export default function RidersScreen() {
   const [riderPhone, setRiderPhone] = useState('');
   const [riderPin, setRiderPin] = useState('');
   const [savingRider, setSavingRider] = useState(false);
+  const mapRef = useRef<any>(null);
 
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [selectedOrderId, setSelectedOrderId] = useState('');
@@ -122,6 +156,13 @@ export default function RidersScreen() {
   const [assignDeliveryFee, setAssignDeliveryFee] = useState('5000');
   const [assignNotes, setAssignNotes] = useState('');
   const [assigning, setAssigning] = useState(false);
+
+  // GPS Tracking state
+  const [riderLocations, setRiderLocations] = useState<RiderLocation[]>([]);
+  const [selectedTrackingRider, setSelectedTrackingRider] = useState<string | null>(null);
+  const [loadingLocations, setLoadingLocations] = useState(false);
+  const locationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const mapRef = useRef<MapView>(null);
 
   const [showDeliveryDetail, setShowDeliveryDetail] = useState<RiderDelivery | null>(null);
   const [showOTPVerify, setShowOTPVerify] = useState(false);
@@ -165,6 +206,26 @@ export default function RidersScreen() {
 
   useEffect(() => { loadData(); }, []);
   useEffect(() => { if (tabMode === 'earnings') loadEarnings(); }, [tabMode, earningsMonth]);
+
+  // Poll rider locations every 30 seconds when tracking tab is active
+  useEffect(() => {
+    if (tabMode === 'tracking') {
+      loadRiderLocations();
+      locationPollRef.current = setInterval(loadRiderLocations, 30000);
+    } else {
+      if (locationPollRef.current) clearInterval(locationPollRef.current);
+    }
+    return () => { if (locationPollRef.current) clearInterval(locationPollRef.current); };
+  }, [tabMode]);
+
+  const loadRiderLocations = useCallback(async () => {
+    setLoadingLocations(true);
+    try {
+      const { data } = await db.from('pos_rider_locations').select('*').order('updated_at', { ascending: false });
+      if (data) setRiderLocations(data);
+    } catch {}
+    finally { setLoadingLocations(false); }
+  }, []);
 
   const deliveryOrders = useMemo(() =>
     orders.filter(o => o.type === 'delivery' && o.status !== 'completed' && o.status !== 'cancelled')
@@ -261,6 +322,14 @@ export default function RidersScreen() {
           period_month: new Date().toISOString().slice(0, 7),
         });
       }
+      // Send FCM notification to rider
+      await sendRiderNotification(
+        assignRiderId,
+        '🚚 New Delivery Assigned!',
+        `You have a new delivery. OTP: ${otp}. Check app for details.`,
+        'delivery_assigned',
+        { delivery_id: delivId, order_id: selectedOrderId, otp }
+      );
       setShowAssignModal(false);
       showAlert('Rider Assigned', `${rider.name} assigned. OTP: ${otp}`);
       loadData();
@@ -311,6 +380,14 @@ export default function RidersScreen() {
       const now = new Date().toISOString();
       await db.from('pos_rider_deliveries').update({ status: 'failed', fail_reason: failReason.trim(), failed_at: now, updated_at: now }).eq('id', showDeliveryDetail.id);
       setDeliveries(prev => prev.map(d => d.id === showDeliveryDetail.id ? { ...d, status: 'failed', fail_reason: failReason.trim() } : d));
+      // Notify rider about failed delivery follow-up
+      await sendRiderNotification(
+        showDeliveryDetail.rider_id,
+        '❌ Delivery Failed — Follow Up Required',
+        `Delivery ${showDeliveryDetail.order_no || ''} marked failed: ${failReason.trim()}. Contact manager for next steps.`,
+        'delivery_failed',
+        { delivery_id: showDeliveryDetail.id, reason: failReason.trim() }
+      );
       setShowFailModal(false); setFailReason(''); setShowDeliveryDetail(null);
       showAlert('Marked Failed', 'Delivery marked as failed.');
     } catch { showAlert('Error', 'Could not update status.'); }
@@ -339,6 +416,29 @@ export default function RidersScreen() {
     } catch { showAlert('Error', 'Could not upload photo.'); }
     finally { setUploadingPhoto(false); }
   };
+
+  // ─── Send FCM Notification ──────────────────────────────────────────────────
+  const sendRiderNotification = useCallback(async (
+    riderId: string,
+    title: string,
+    body: string,
+    notificationType: string,
+    data?: Record<string, string>
+  ) => {
+    try {
+      const { error } = await db.functions.invoke('send-rider-notification', {
+        body: { rider_id: riderId, title, body, notification_type: notificationType, data },
+      });
+      if (error) {
+        if (error instanceof FunctionsHttpError) {
+          const text = await error.context?.text();
+          console.log('FCM error:', text);
+        }
+      }
+    } catch (err) {
+      console.log('sendRiderNotification error:', err);
+    }
+  }, []);
 
   // ─── Financial Report ───────────────────────────────────────────────────────
   const buildEarningsReportHTML = () => {
@@ -412,6 +512,7 @@ ${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.
           { key: 'deliveries', label: 'Deliveries', icon: 'local-shipping' },
           { key: 'riders', label: 'Riders', icon: 'two-wheeler' },
           { key: 'earnings', label: 'Earnings', icon: 'payments' },
+          { key: 'tracking', label: 'Live Map', icon: 'map' },
         ] as { key: TabMode; label: string; icon: string }[]).map(t => (
           <TouchableOpacity key={t.key} style={[styles.tabBtn, tabMode === t.key && styles.tabBtnActive]} onPress={() => setTabMode(t.key)}>
             <MaterialIcons name={t.icon as any} size={15} color={tabMode === t.key ? Colors.navy : Colors.textMuted} />
@@ -618,6 +719,134 @@ ${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.
             </View>
           )}
         </ScrollView>
+      )}
+
+      {/* ── TRACKING TAB ─────────────────────────────────────────────────────── */}
+      {tabMode === 'tracking' && (
+        <View style={{ flex: 1 }}>
+          {/* Rider selector */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filterRow} style={{ maxHeight: 52, flexGrow: 0 }}>
+            <TouchableOpacity
+              style={[styles.filterChip, selectedTrackingRider === null && { backgroundColor: Colors.gold + '20', borderColor: Colors.gold }]}
+              onPress={() => setSelectedTrackingRider(null)}
+            >
+              <Text style={[styles.filterChipText, selectedTrackingRider === null && { color: Colors.gold, fontWeight: Typography.bold }]}>All Riders</Text>
+            </TouchableOpacity>
+            {riders.filter(r => r.status === 'active').map(r => {
+              const loc = riderLocations.find(l => l.rider_id === r.id);
+              const isSelected = selectedTrackingRider === r.id;
+              const isOnline = loc && (Date.now() - new Date(loc.updated_at).getTime()) < 5 * 60 * 1000;
+              return (
+                <TouchableOpacity
+                  key={r.id}
+                  style={[styles.filterChip, isSelected && { backgroundColor: Colors.success + '20', borderColor: Colors.success }]}
+                  onPress={() => setSelectedTrackingRider(r.id)}
+                >
+                  <View style={[{ width: 6, height: 6, borderRadius: 3, backgroundColor: isOnline ? Colors.success : Colors.textMuted }]} />
+                  <Text style={[styles.filterChipText, isSelected && { color: Colors.success, fontWeight: Typography.bold }]}>{r.name.split(' ')[0]}</Text>
+                </TouchableOpacity>
+              );
+            })}
+            <TouchableOpacity style={[styles.filterChip, { borderColor: Colors.skyBlue + '40' }]} onPress={loadRiderLocations}>
+              {loadingLocations
+                ? <ActivityIndicator size={11} color={Colors.skyBlue} />
+                : <MaterialIcons name="refresh" size={14} color={Colors.skyBlue} />
+              }
+              <Text style={[styles.filterChipText, { color: Colors.skyBlue }]}>Refresh</Text>
+            </TouchableOpacity>
+          </ScrollView>
+
+          {/* Map */}
+          <View style={{ flex: 1, margin: Spacing.md, borderRadius: BorderRadius.lg, overflow: 'hidden', borderWidth: 1, borderColor: Colors.borderGold }}>
+            <RiderMapRenderer
+              mapRef={mapRef}
+              initialLat={0.3476}
+              initialLng={32.5825}
+              markers={riderLocations
+                .filter(loc => selectedTrackingRider === null || loc.rider_id === selectedTrackingRider)
+                .flatMap(loc => {
+                  const rider = riders.find(r => r.id === loc.rider_id);
+                  const isOnline = (Date.now() - new Date(loc.updated_at).getTime()) < 5 * 60 * 1000;
+                  const activeDelivery = deliveries.find(d => d.rider_id === loc.rider_id && ['accepted', 'picked_up', 'in_transit'].includes(d.status));
+                  const distKm = activeDelivery?.customer_lat && activeDelivery?.customer_lng
+                    ? haversineKm(loc.lat, loc.lng, Number(activeDelivery.customer_lat), Number(activeDelivery.customer_lng))
+                    : null;
+                  const eta = distKm !== null ? estimateETA(distKm) : null;
+                  const result: any[] = [{
+                    id: `rider_${loc.id}`,
+                    lat: Number(loc.lat),
+                    lng: Number(loc.lng),
+                    title: rider?.name || 'Rider',
+                    description: eta ? `ETA: ${eta} · ${distKm?.toFixed(1)}km` : `Updated: ${new Date(loc.updated_at).toLocaleTimeString('en-UG', { hour: '2-digit', minute: '2-digit' })}`,
+                    color: isOnline ? Colors.success : '#888',
+                  }];
+                  if (activeDelivery?.customer_lat && activeDelivery?.customer_lng) {
+                    result.push({
+                      id: `cust_${loc.id}`,
+                      lat: Number(activeDelivery.customer_lat),
+                      lng: Number(activeDelivery.customer_lng),
+                      title: activeDelivery.customer_name || 'Customer',
+                      description: activeDelivery.customer_address || '',
+                      color: Colors.danger,
+                    });
+                  }
+                  return result;
+                })
+              }
+              polylines={riderLocations
+                .filter(loc => selectedTrackingRider === null || loc.rider_id === selectedTrackingRider)
+                .flatMap(loc => {
+                  const activeDelivery = deliveries.find(d => d.rider_id === loc.rider_id && ['accepted', 'picked_up', 'in_transit'].includes(d.status));
+                  if (!activeDelivery?.customer_lat || !activeDelivery?.customer_lng) return [];
+                  return [{ from: { lat: Number(loc.lat), lng: Number(loc.lng) }, to: { lat: Number(activeDelivery.customer_lat), lng: Number(activeDelivery.customer_lng) }, color: Colors.gold }];
+                })
+              }
+            />
+          </View>
+
+          {/* Rider location cards below map */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: Spacing.base, paddingBottom: Spacing.md, gap: 10 }} style={{ maxHeight: 110, flexGrow: 0 }}>
+            {riders.filter(r => r.status === 'active').map(rider => {
+              const loc = riderLocations.find(l => l.rider_id === rider.id);
+              const isOnline = loc && (Date.now() - new Date(loc.updated_at).getTime()) < 5 * 60 * 1000;
+              const activeDelivery = deliveries.find(d => d.rider_id === rider.id && ['accepted', 'picked_up', 'in_transit'].includes(d.status));
+              const distKm = loc && activeDelivery?.customer_lat && activeDelivery?.customer_lng
+                ? haversineKm(loc.lat, loc.lng, Number(activeDelivery.customer_lat), Number(activeDelivery.customer_lng))
+                : null;
+              return (
+                <TouchableOpacity
+                  key={rider.id}
+                  style={[styles.riderLocCard, selectedTrackingRider === rider.id && { borderColor: Colors.gold }]}
+                  onPress={() => {
+                    setSelectedTrackingRider(rider.id === selectedTrackingRider ? null : rider.id);
+                    if (loc && mapRef.current) {
+                      mapRef.current.animateToRegion({ latitude: Number(loc.lat), longitude: Number(loc.lng), latitudeDelta: 0.02, longitudeDelta: 0.02 }, 800);
+                    }
+                  }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                    <View style={[{ width: 8, height: 8, borderRadius: 4, backgroundColor: isOnline ? Colors.success : Colors.textMuted }]} />
+                    <Text style={styles.riderLocName}>{rider.name.split(' ')[0]}</Text>
+                  </View>
+                  {loc ? (
+                    <>
+                      <Text style={styles.riderLocTime}>Updated {new Date(loc.updated_at).toLocaleTimeString('en-UG', { hour: '2-digit', minute: '2-digit' })}</Text>
+                      {distKm !== null && <Text style={[styles.riderLocTime, { color: Colors.gold }]}>ETA: {estimateETA(distKm)}</Text>}
+                      {activeDelivery && <Text style={styles.riderLocDelivery}>{STATUS_CONFIG[activeDelivery.status as DeliveryStatus]?.label || activeDelivery.status}</Text>}
+                    </>
+                  ) : (
+                    <Text style={styles.riderLocTime}>No location data</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+            {riders.filter(r => r.status === 'active').length === 0 && (
+              <View style={styles.centered}>
+                <Text style={styles.emptyText}>No active riders</Text>
+              </View>
+            )}
+          </ScrollView>
+        </View>
       )}
 
       {/* ── EARNINGS TAB ─────────────────────────────────────────────────────── */}
@@ -1088,6 +1317,17 @@ const styles = StyleSheet.create({
   earningLogName: { fontSize: Typography.xs, fontWeight: Typography.semibold, color: Colors.textPrimary },
   earningLogDesc: { fontSize: 10, color: Colors.textMuted },
   earningLogAmount: { fontSize: Typography.sm, fontWeight: Typography.bold },
+  // Map / Tracking
+  mapFallback: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, backgroundColor: Colors.navyCard, padding: 40 },
+  mapFallbackText: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.textMuted, textAlign: 'center' },
+  mapFallbackSub: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'center' },
+  riderLocCard: {
+    backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border,
+    padding: Spacing.md, gap: 3, minWidth: 130,
+  },
+  riderLocName: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary },
+  riderLocTime: { fontSize: 10, color: Colors.textMuted },
+  riderLocDelivery: { fontSize: 10, color: Colors.skyBlue, fontWeight: Typography.semibold },
   // Modals
   modalOverlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end' },
   modal: { backgroundColor: Colors.navyMid, borderTopLeftRadius: BorderRadius.xxl, borderTopRightRadius: BorderRadius.xxl, maxHeight: '90%', borderTopWidth: 2, borderColor: Colors.borderGold },

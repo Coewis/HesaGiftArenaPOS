@@ -223,6 +223,20 @@ export default function LoginScreen() {
           <Text style={styles.demoText}>Admin: admin@hesagift.ug / admin123 (PIN: 1234)</Text>
           <Text style={styles.demoText}>Cashier: cashier@hesagift.ug / cashier123 (PIN: 3456)</Text>
         </View>
+
+        {/* Rider Portal Link */}
+        <TouchableOpacity style={styles.riderPortalBtn} onPress={() => router.push('/rider-login')}>
+          <View style={styles.riderPortalLeft}>
+            <View style={styles.riderPortalIcon}>
+              <MaterialIcons name="two-wheeler" size={20} color={Colors.gold} />
+            </View>
+            <View>
+              <Text style={styles.riderPortalTitle}>Delivery Rider?</Text>
+              <Text style={styles.riderPortalSub}>Tap here to open the Rider Portal</Text>
+            </View>
+          </View>
+          <MaterialIcons name="arrow-forward-ios" size={14} color={Colors.textMuted} />
+        </TouchableOpacity>
       </ScrollView>
 
       {/* Branch Selection Modal */}
@@ -382,6 +396,16 @@ const styles = StyleSheet.create({
   },
   demoTitle: { fontSize: Typography.xs, fontWeight: Typography.bold, color: Colors.gold, letterSpacing: 1 },
   demoText: { fontSize: Typography.xs, color: Colors.textSecondary },
+  riderPortalBtn: {
+    width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    backgroundColor: Colors.navyLight, borderRadius: BorderRadius.lg,
+    borderWidth: 1, borderColor: Colors.borderGold,
+    paddingHorizontal: Spacing.md, paddingVertical: Spacing.sm, marginTop: 4,
+  },
+  riderPortalLeft: { flexDirection: 'row', alignItems: 'center', gap: Spacing.sm },
+  riderPortalIcon: { width: 44, height: 44, borderRadius: 22, backgroundColor: Colors.goldMuted, alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: Colors.borderGold },
+  riderPortalTitle: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary },
+  riderPortalSub: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 1 },
 
   // Branch Modal
   modalOverlay: {

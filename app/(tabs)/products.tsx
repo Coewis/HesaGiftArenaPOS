@@ -471,6 +471,29 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
 
   const validSelectedCount = csvRows.filter(r => r.selected && r.errors.length === 0 && !r.isDuplicate).length;
 
+  const handleDownloadCSVTemplate = async () => {
+    const header = 'name,barcode,price,stock,category';
+    const example1 = 'Premium Rose Bouquet,HGA001,45000,20,Bouquets';
+    const example2 = 'Luxury Gift Box,HGA002,75000,10,Gifts';
+    const example3 = 'Teddy Bear (Large),HGA003,35000,15,Teddies';
+    const example4 = 'Birthday Balloon Set,HGA004,25000,30,Balloons';
+    const example5 = 'Chocolate Hamper,HGA005,120000,8,Hampers';
+    const csvContent = [header, example1, example2, example3, example4, example5].join('\n');
+    try {
+      const fileName = 'hga-products-import-template.csv';
+      const path = `${FileSystem.documentDirectory}${fileName}`;
+      await FileSystem.writeAsStringAsync(path, csvContent, { encoding: FileSystem.EncodingType.UTF8 });
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(path, { mimeType: 'text/csv', dialogTitle: 'Download CSV Import Template' });
+      } else {
+        showAlert('Template Ready', 'CSV template saved to device.');
+      }
+    } catch {
+      showAlert('Error', 'Could not generate template.');
+    }
+  };
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
@@ -480,7 +503,14 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
         </View>
         <View style={styles.headerBtns}>
           {tabMode === 'products' && hasPermission('products') && (
-            <TouchableOpacity style={[styles.addBtn, { backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.borderGold }]} onPress={handlePickCSV}>
+            <TouchableOpacity
+              style={[styles.addBtn, { backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.borderGold }]}
+              onPress={() => showAlert('CSV Import', 'Choose an action:', [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Download Template', onPress: handleDownloadCSVTemplate },
+                { text: 'Import CSV', onPress: handlePickCSV },
+              ])}
+            >
               <MaterialIcons name="upload-file" size={16} color={Colors.gold} />
               <Text style={[styles.addBtnText, { color: Colors.gold }]}>CSV</Text>
             </TouchableOpacity>

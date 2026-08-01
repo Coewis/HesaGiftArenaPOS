@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import {
   View, Text, TextInput, TouchableOpacity, FlatList,
   StyleSheet, Modal, ScrollView, ActivityIndicator,
@@ -11,6 +11,7 @@ import { usePOS } from '@/hooks/usePOS';
 import { useAlert } from '@/template';
 import { Colors, Typography, Spacing, BorderRadius, Shadows } from '@/constants/theme';
 import { Customer } from '@/types';
+import { fetchSMSLogs, sendBulkPromotionalSMS, SMSLog } from '@/services/smsService';
 
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
 
@@ -42,6 +43,49 @@ export default function CustomersScreen() {
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [filterTier, setFilterTier] = useState<string>('all');
   const [generatingCard, setGeneratingCard] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'customers' | 'sms'>('customers');
+
+  // SMS state
+  const [smsLogs, setSmsLogs] = useState<SMSLog[]>([]);
+  const [smsLoading, setSmsLoading] = useState(false);
+  const [showCampaignModal, setShowCampaignModal] = useState(false);
+  const [campaignMessage, setCampaignMessage] = useState('');
+  const [campaignTier, setCampaignTier] = useState<string>('all');
+  const [sendingCampaign, setSendingCampaign] = useState(false);
+
+  const loadSMSLogs = useCallback(async () => {
+    setSmsLoading(true);
+    try {
+      const logs = await fetchSMSLogs(100);
+      setSmsLogs(logs);
+    } catch {}
+    finally { setSmsLoading(false); }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === 'sms') loadSMSLogs();
+  }, [activeTab]);
+
+  const handleSendCampaign = async () => {
+    if (!campaignMessage.trim()) { showAlert('Missing', 'Enter a campaign message.'); return; }
+    const recipients = customers
+      .filter(c => c.phone && (campaignTier === 'all' || c.tier === campaignTier))
+      .map(c => ({ phone: c.phone, name: c.name, id: c.id }));
+    if (recipients.length === 0) { showAlert('No Recipients', 'No customers match the selected tier.'); return; }
+    showAlert('Send Campaign', `Send SMS to ${recipients.length} customers?`, [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Send', onPress: async () => {
+        setSendingCampaign(true);
+        setShowCampaignModal(false);
+        try {
+          const result = await sendBulkPromotionalSMS({ recipients, campaignMessage });
+          showAlert('Campaign Sent', `${result.sent} sent, ${result.failed} failed.`);
+          loadSMSLogs();
+        } catch { showAlert('Error', 'Campaign failed.'); }
+        finally { setSendingCampaign(false); }
+      }},
+    ]);
+  };
 
   const [formName, setFormName] = useState('');
   const [formPhone, setFormPhone] = useState('');
@@ -228,6 +272,13 @@ ${thresholds.next ? `.next-tier{background:${tierColor}15;border:1px solid ${tie
     }
   };
 
+  const SMS_TYPE_CONFIG: Record<string, { label: string; color: string }> = {
+    receipt:     { label: 'Receipt',   color: Colors.success },
+    tier_upgrade: { label: 'Tier Up',  color: Colors.gold },
+    promotional: { label: 'Campaign',  color: '#9B59B6' },
+    loyalty:     { label: 'Loyalty',   color: Colors.skyBlue },
+  };
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
@@ -242,6 +293,129 @@ ${thresholds.next ? `.next-tier{background:${tierColor}15;border:1px solid ${tie
         </TouchableOpacity>
       </View>
 
+      {/* Tab Toggle */}
+      <View style={styles.tabToggle}>
+        {([{ key: 'customers', label: 'Customers', icon: 'people' }, { key: 'sms', label: 'SMS History', icon: 'message' }] as const).map(t => (
+          <TouchableOpacity key={t.key} style={[styles.tabToggleBtn, activeTab === t.key && styles.tabToggleBtnActive]} onPress={() => setActiveTab(t.key)}>
+            <MaterialIcons name={t.icon as any} size={14} color={activeTab === t.key ? Colors.navy : Colors.textMuted} />
+            <Text style={[styles.tabToggleBtnText, activeTab === t.key && styles.tabToggleBtnTextActive]}>{t.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+
+      {/* SMS History Tab */}
+      {activeTab === 'sms' ? (
+        <View style={{ flex: 1 }}>
+          <View style={styles.smsHeaderRow}>
+            <Text style={styles.smsHeaderTitle}>{smsLogs.length} Messages Sent</Text>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity style={styles.campaignBtn} onPress={() => setShowCampaignModal(true)} disabled={sendingCampaign}>
+                {sendingCampaign ? <ActivityIndicator size="small" color={Colors.navy} /> : <MaterialIcons name="send" size={14} color={Colors.navy} />}
+                <Text style={styles.campaignBtnText}>{sendingCampaign ? 'Sending...' : 'Campaign'}</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.smsRefreshBtn} onPress={loadSMSLogs} disabled={smsLoading}>
+                {smsLoading ? <ActivityIndicator size="small" color={Colors.gold} /> : <MaterialIcons name="refresh" size={18} color={Colors.gold} />}
+              </TouchableOpacity>
+            </View>
+          </View>
+          {smsLoading ? (
+            <View style={styles.smsLoading}><ActivityIndicator color={Colors.gold} size="large" /></View>
+          ) : smsLogs.length === 0 ? (
+            <View style={styles.smsEmpty}>
+              <MaterialIcons name="message" size={56} color={Colors.textMuted} />
+              <Text style={styles.smsEmptyText}>No SMS messages yet</Text>
+              <Text style={styles.smsEmptySub}>Messages will appear here after purchases and tier upgrades</Text>
+            </View>
+          ) : (
+            <FlatList
+              data={smsLogs}
+              keyExtractor={item => item.id}
+              contentContainerStyle={styles.smsList}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                const typeCfg = SMS_TYPE_CONFIG[item.message_type] || { label: item.message_type, color: Colors.textMuted };
+                const isSuccess = item.status === 'sent';
+                return (
+                  <View style={styles.smsLogRow}>
+                    <View style={[styles.smsLogIcon, { backgroundColor: typeCfg.color + '18' }]}>
+                      <MaterialIcons name={item.message_type === 'receipt' ? 'receipt' : item.message_type === 'tier_upgrade' ? 'star' : 'campaign'} size={16} color={typeCfg.color} />
+                    </View>
+                    <View style={styles.smsLogBody}>
+                      <View style={styles.smsLogTopRow}>
+                        <View style={[styles.smsTypePill, { backgroundColor: typeCfg.color + '18' }]}>
+                          <Text style={[styles.smsTypeText, { color: typeCfg.color }]}>{typeCfg.label}</Text>
+                        </View>
+                        <View style={[styles.smsStatusPill, { backgroundColor: isSuccess ? Colors.successMuted : Colors.dangerMuted }]}>
+                          <View style={[{ width: 5, height: 5, borderRadius: 2.5, backgroundColor: isSuccess ? Colors.success : Colors.danger }]} />
+                          <Text style={[styles.smsStatusText, { color: isSuccess ? Colors.success : Colors.danger }]}>{item.status}</Text>
+                        </View>
+                        <Text style={styles.smsLogTime}>{new Date(item.sent_at).toLocaleString('en-UG', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</Text>
+                      </View>
+                      {item.customer_name ? <Text style={styles.smsLogCustomer}>{item.customer_name}</Text> : null}
+                      <Text style={styles.smsLogPhone}>{item.phone}</Text>
+                      <Text style={styles.smsLogMsg} numberOfLines={2}>{item.message}</Text>
+                      {item.cost ? <Text style={styles.smsLogCost}>Cost: {item.cost}</Text> : null}
+                    </View>
+                  </View>
+                );
+              }}
+            />
+          )}
+
+          {/* Campaign Modal */}
+          <Modal visible={showCampaignModal} transparent animationType="slide">
+            <View style={styles.modalOverlay}>
+              <View style={styles.modal}>
+                <View style={styles.modalHeader}>
+                  <Text style={styles.modalTitle}>Send Promotional Campaign</Text>
+                  <TouchableOpacity onPress={() => setShowCampaignModal(false)}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+                </View>
+                <ScrollView contentContainerStyle={styles.modalBody}>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.formLabel}>Target Tier</Text>
+                    <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+                      {['all', 'Platinum', 'Gold', 'Silver', 'Bronze'].map(tier => (
+                        <TouchableOpacity
+                          key={tier}
+                          style={[styles.campaignTierChip, campaignTier === tier && { backgroundColor: Colors.gold + '20', borderColor: Colors.gold }]}
+                          onPress={() => setCampaignTier(tier)}
+                        >
+                          {tier !== 'all' && <Text>{TIER_ICONS[tier]}</Text>}
+                          <Text style={[styles.campaignTierText, campaignTier === tier && { color: Colors.gold, fontWeight: Typography.bold }]}>{tier === 'all' ? 'All Tiers' : tier}</Text>
+                          {campaignTier === tier && <MaterialIcons name="check" size={12} color={Colors.gold} />}
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                    <Text style={styles.campaignRecipientCount}>
+                      {customers.filter(c => campaignTier === 'all' || c.tier === campaignTier).length} recipients selected
+                    </Text>
+                  </View>
+                  <View style={styles.formGroup}>
+                    <Text style={styles.formLabel}>Message * (use {'{name}'} for personalisation)</Text>
+                    <TextInput
+                      style={[styles.formInput, { height: 100, textAlignVertical: 'top' }]}
+                      placeholder="Hi {name}, HESA GIFT ARENA has a special offer just for you! Visit us today..."
+                      placeholderTextColor={Colors.textMuted}
+                      value={campaignMessage}
+                      onChangeText={setCampaignMessage}
+                      multiline
+                    />
+                    <Text style={styles.campaignCharCount}>{campaignMessage.length} chars</Text>
+                  </View>
+                </ScrollView>
+                <View style={styles.modalFooter}>
+                  <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowCampaignModal(false)}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+                  <TouchableOpacity style={[styles.saveBtn, !campaignMessage.trim() && { opacity: 0.5 }]} onPress={handleSendCampaign} disabled={!campaignMessage.trim()}>
+                    <MaterialIcons name="send" size={16} color={Colors.navy} />
+                    <Text style={styles.saveBtnText}>Send Campaign</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </View>
+          </Modal>
+        </View>
+      ) : (
+        <>
       {/* Search */}
       <View style={styles.searchBar}>
         <MaterialIcons name="search" size={16} color={Colors.textMuted} />
@@ -373,6 +547,9 @@ ${thresholds.next ? `.next-tier{background:${tierColor}15;border:1px solid ${tie
           );
         }}
       />
+
+      </>
+      )}
 
       {/* Add Customer Modal */}
       <Modal visible={showModal} transparent animationType="slide">
@@ -548,6 +725,40 @@ ${thresholds.next ? `.next-tier{background:${tierColor}15;border:1px solid ${tie
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: Colors.navy },
+  tabToggle: { flexDirection: 'row', margin: Spacing.md, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, padding: 3, borderWidth: 1, borderColor: Colors.border },
+  tabToggleBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, paddingVertical: 8, borderRadius: BorderRadius.md },
+  tabToggleBtnActive: { backgroundColor: Colors.gold },
+  tabToggleBtnText: { fontSize: Typography.xs, color: Colors.textMuted, fontWeight: Typography.medium },
+  tabToggleBtnTextActive: { color: Colors.navy, fontWeight: Typography.bold },
+  // SMS History
+  smsHeaderRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: Spacing.base, paddingBottom: Spacing.sm },
+  smsHeaderTitle: { fontSize: Typography.sm, fontWeight: Typography.semibold, color: Colors.textSecondary },
+  campaignBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.gold, paddingHorizontal: 10, paddingVertical: 7, borderRadius: BorderRadius.md, ...Shadows.gold },
+  campaignBtnText: { fontSize: 11, fontWeight: Typography.bold, color: Colors.navy },
+  smsRefreshBtn: { padding: 6, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.border },
+  smsLoading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+  smsEmpty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, padding: 40 },
+  smsEmptyText: { fontSize: Typography.base, color: Colors.textMuted, fontWeight: Typography.semibold },
+  smsEmptySub: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'center' },
+  smsList: { paddingHorizontal: Spacing.base, paddingBottom: 100, gap: 8 },
+  smsLogRow: { flexDirection: 'row', alignItems: 'flex-start', gap: 10, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md },
+  smsLogIcon: { width: 36, height: 36, borderRadius: 10, alignItems: 'center', justifyContent: 'center', flexShrink: 0 },
+  smsLogBody: { flex: 1, gap: 3 },
+  smsLogTopRow: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  smsTypePill: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: BorderRadius.circle },
+  smsTypeText: { fontSize: 10, fontWeight: Typography.bold },
+  smsStatusPill: { flexDirection: 'row', alignItems: 'center', gap: 3, paddingHorizontal: 6, paddingVertical: 2, borderRadius: BorderRadius.circle },
+  smsStatusText: { fontSize: 10, fontWeight: Typography.bold },
+  smsLogTime: { fontSize: 10, color: Colors.textMuted, marginLeft: 'auto' as any },
+  smsLogCustomer: { fontSize: Typography.xs, fontWeight: Typography.semibold, color: Colors.textPrimary },
+  smsLogPhone: { fontSize: Typography.xs, color: Colors.textMuted },
+  smsLogMsg: { fontSize: Typography.xs, color: Colors.textSecondary, lineHeight: 16 },
+  smsLogCost: { fontSize: 10, color: Colors.skyBlue },
+  // Campaign Modal
+  campaignTierChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 7, borderRadius: BorderRadius.md, backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border },
+  campaignTierText: { fontSize: 11, color: Colors.textMuted },
+  campaignRecipientCount: { fontSize: Typography.xs, color: Colors.skyBlue, marginTop: 4 },
+  campaignCharCount: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'right', marginTop: 2 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: Spacing.base, paddingVertical: Spacing.md,

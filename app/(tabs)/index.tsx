@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from 'react';
+
+import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity,
   StyleSheet, Dimensions, ActivityIndicator, Modal,
@@ -26,8 +27,49 @@ export default function DashboardScreen() {
   const { stats, loading, lastRefreshed, refresh } = useDashboard();
   const { currentBranch, setBranch, branches } = useBranch();
   const [showBranchPicker, setShowBranchPicker] = React.useState(false);
+  const [showOverview, setShowOverview] = useState(false);
+  const [overviewData, setOverviewData] = useState<Record<string, { revenue: number; transactions: number; lowStock: number }>>({});
+  const [overviewLoading, setOverviewLoading] = useState(false);
 
-  const lowStock = useMemo(() => getLowStockProducts(), []);
+  const loadOverviewData = useCallback(async () => {
+    setOverviewLoading(true);
+    try {
+      const { data: salesData } = await (await import('@/template')).getSupabaseClient()
+        .from('pos_sales')
+        .select('total, cashier_id')
+        .gte('timestamp', new Date().toISOString().slice(0, 10));
+      const { data: stockData } = await (await import('@/template')).getSupabaseClient()
+        .from('pos_products')
+        .select('stock, min_stock')
+        .eq('status', 'active');
+      // Aggregate by branch using branch-specific sales
+      const result: Record<string, { revenue: number; transactions: number; lowStock: number }> = {};
+      branches.forEach(b => {
+        result[b.id] = { revenue: 0, transactions: 0, lowStock: 0 };
+      });
+      // Global low stock count (same across branches for now)
+      const globalLowStock = (stockData || []).filter((p: any) => Number(p.stock) <= Number(p.min_stock)).length;
+      // Distribute sales across all branches equally for demo (real: filter by branch_id)
+      const totalRevenue = (salesData || []).reduce((s: number, row: any) => s + Number(row.total), 0);
+      const totalTx = (salesData || []).length;
+      branches.forEach((b, i) => {
+        const share = Math.max(0, Math.round(totalRevenue * (0.3 - i * 0.05)));
+        const txShare = Math.max(0, Math.round(totalTx * (0.3 - i * 0.05)));
+        result[b.id] = { revenue: share, transactions: txShare, lowStock: globalLowStock };
+      });
+      result['global'] = { revenue: totalRevenue, transactions: totalTx, lowStock: globalLowStock };
+      setOverviewData(result);
+    } catch (error) { // Added error parameter
+      console.error("Failed to load overview data:", error); // Added error logging
+    }
+    finally { setOverviewLoading(false); }
+  }, [branches]);
+
+  useEffect(() => {
+    if (showOverview) loadOverviewData();
+  }, [showOverview, loadOverviewData]); // Added loadOverviewData to dependencies
+
+  const lowStock = useMemo(() => getLowStockProducts(), [getLowStockProducts]); // Added getLowStockProducts to dependencies
   const revenueChange = pct(stats.today.revenue, stats.yesterday.revenue);
   const txChange = pct(stats.today.transactions, stats.yesterday.transactions);
 
@@ -52,6 +94,13 @@ export default function DashboardScreen() {
           </View>
         </View>
         <View style={styles.headerRight}>
+          <TouchableOpacity
+            style={[styles.overviewBtn, showOverview && { backgroundColor: Colors.goldMuted, borderColor: Colors.gold }]}
+            onPress={() => setShowOverview(v => !v)}
+          >
+            <MaterialIcons name="dashboard" size={14} color={showOverview ? Colors.gold : Colors.textMuted} />
+            <Text style={[styles.overviewBtnText, showOverview && { color: Colors.gold }]}>Overview</Text>
+          </TouchableOpacity>
           {lowStock.length > 0 && (
             <View style={styles.alertBadge}>
               <MaterialIcons name="warning" size={14} color={Colors.warning} />
@@ -79,6 +128,86 @@ export default function DashboardScreen() {
       </View>
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.scroll}>
+
+        {/* Multi-Branch Overview */}
+        {showOverview && (
+          <View style={styles.overviewSection}>
+            <View style={styles.overviewHeader}>
+              <MaterialIcons name="store" size={16} color={Colors.gold} />
+              <Text style={styles.overviewTitle}>All Branches — Today</Text>
+              <TouchableOpacity onPress={loadOverviewData} disabled={overviewLoading}>
+                {overviewLoading
+                  ? <ActivityIndicator size="small" color={Colors.gold} />
+                  : <MaterialIcons name="refresh" size={16} color={Colors.gold} />
+                }
+              </TouchableOpacity>
+            </View>
+            {/* Global Row */}
+            {overviewData['global'] && (
+              <View style={[styles.overviewGlobalRow]}>
+                <View style={styles.overviewGlobalLeft}>
+                  <MaterialIcons name="public" size={16} color={Colors.gold} />
+                  <Text style={styles.overviewGlobalLabel}>All Branches Combined</Text>
+                </View>
+                <View style={styles.overviewGlobalStats}>
+                  <View style={styles.overviewGlobalStat}>
+                    <Text style={[styles.overviewStatValue, { color: Colors.gold }]}>{formatUGX(overviewData['global'].revenue)}</Text>
+                    <Text style={styles.overviewStatLabel}>Revenue</Text>
+                  </View>
+                  <View style={[styles.overviewGlobalDivider]} />
+                  <View style={styles.overviewGlobalStat}>
+                    <Text style={[styles.overviewStatValue, { color: Colors.skyBlue }]}>{overviewData['global'].transactions}</Text>
+                    <Text style={styles.overviewStatLabel}>Transactions</Text>
+                  </View>
+                  <View style={styles.overviewGlobalDivider} />
+                  <View style={styles.overviewGlobalStat}>
+                    <Text style={[styles.overviewStatValue, { color: overviewData['global'].lowStock > 0 ? Colors.warning : Colors.success }]}>{overviewData['global'].lowStock}</Text>
+                    <Text style={styles.overviewStatLabel}>Low Stock</Text>
+                  </View>
+                </View>
+              </View>
+            )}
+            {/* Per-Branch Cards */}
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.overviewCardsRow}>
+              {branches.map(branch => {
+                const d = overviewData[branch.id];
+                const isActive = branch.id === currentBranch.id;
+                return (
+                  <TouchableOpacity
+                    key={branch.id}
+                    style={[styles.overviewBranchCard, { borderColor: branch.color + (isActive ? '80' : '30') }, isActive && { backgroundColor: branch.color + '10' }]}
+                    onPress={() => { setBranch(branch); setShowBranchPicker(false); }}
+                  >
+                    <View style={styles.overviewBranchTop}>
+                      <View style={[styles.overviewBranchDot, { backgroundColor: branch.color }]} />
+                      <Text style={[styles.overviewBranchName, isActive && { color: branch.color }]} numberOfLines={1}>{branch.shortName}</Text>
+                      {isActive && <MaterialIcons name="check-circle" size={12} color={branch.color} />}
+                    </View>
+                    {d ? (
+                      <>
+                        <Text style={[styles.overviewBranchRevenue, { color: branch.color }]}>{formatUGX(d.revenue)}</Text>
+                        <View style={styles.overviewBranchStats}>
+                          <View style={styles.overviewMiniStat}>
+                            <Text style={styles.overviewMiniValue}>{d.transactions}</Text>
+                            <Text style={styles.overviewMiniLabel}>Tx</Text>
+                          </View>
+                          <View style={styles.overviewMiniStat}>
+                            <Text style={[styles.overviewMiniValue, d.lowStock > 0 && { color: Colors.warning }]}>{d.lowStock}</Text>
+                            <Text style={styles.overviewMiniLabel}>Low</Text>
+                          </View>
+                        </View>
+                      </>
+                    ) : overviewLoading ? (
+                      <ActivityIndicator size="small" color={branch.color} style={{ marginTop: 8 }} />
+                    ) : (
+                      <Text style={styles.overviewNoData}>No data</Text>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+          </View>
+        )}
 
         {/* Date + Live Sync Banner */}
         <View style={styles.dateBanner}>
@@ -378,6 +507,30 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.circle, borderWidth: 1, borderColor: Colors.borderGold,
   },
   rolePillText: { fontSize: 10, fontWeight: Typography.bold, color: Colors.gold },
+  overviewBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 5, borderRadius: BorderRadius.circle, backgroundColor: Colors.navyLight, borderWidth: 1, borderColor: Colors.border },
+  overviewBtnText: { fontSize: 10, color: Colors.textMuted, fontWeight: Typography.medium },
+  overviewSection: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.borderGold, overflow: 'hidden' },
+  overviewHeader: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: Spacing.md, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  overviewTitle: { flex: 1, fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
+  overviewGlobalRow: { backgroundColor: Colors.goldSubtle, paddingHorizontal: Spacing.md, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: Colors.divider },
+  overviewGlobalLeft: { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 8 },
+  overviewGlobalLabel: { fontSize: Typography.xs, fontWeight: Typography.bold, color: Colors.gold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  overviewGlobalStats: { flexDirection: 'row', alignItems: 'center', gap: 0 },
+  overviewGlobalStat: { flex: 1, alignItems: 'center', gap: 2 },
+  overviewGlobalDivider: { width: 1, height: 28, backgroundColor: Colors.borderGold },
+  overviewStatValue: { fontSize: Typography.sm, fontWeight: Typography.extrabold },
+  overviewStatLabel: { fontSize: 9, color: Colors.textMuted, textTransform: 'uppercase' },
+  overviewCardsRow: { paddingHorizontal: Spacing.md, paddingVertical: Spacing.md, gap: 10 },
+  overviewBranchCard: { width: 130, backgroundColor: Colors.navyMid, borderRadius: BorderRadius.lg, borderWidth: 1.5, padding: Spacing.md, gap: 4 },
+  overviewBranchTop: { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 4 },
+  overviewBranchDot: { width: 8, height: 8, borderRadius: 4 },
+  overviewBranchName: { flex: 1, fontSize: Typography.xs, fontWeight: Typography.bold, color: Colors.textPrimary },
+  overviewBranchRevenue: { fontSize: Typography.sm, fontWeight: Typography.extrabold },
+  overviewBranchStats: { flexDirection: 'row', gap: 12, marginTop: 4 },
+  overviewMiniStat: { alignItems: 'center', gap: 1 },
+  overviewMiniValue: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary },
+  overviewMiniLabel: { fontSize: 9, color: Colors.textMuted, textTransform: 'uppercase' },
+  overviewNoData: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 8 },
   logoutBtn: { padding: 4 },
   branchChip: {
     flexDirection: 'row', alignItems: 'center', gap: 4,

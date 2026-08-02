@@ -1,14 +1,15 @@
-import React, { createContext, useState, useEffect, ReactNode } from 'react';
+import React, { createContext, useState, ReactNode, useRef } from 'react';
 import { MOCK_USERS } from '@/constants/mockData';
 import { User, UserRole } from '@/types';
 import { getSupabaseClient } from '@/template';
+import { BRANCHES, Branch } from '@/contexts/BranchContext';
 
 interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  loginWithPin: (pin: string) => Promise<{ success: boolean; error?: string }>;
+  login: (email: string, password: string) => Promise<{ success: boolean; error?: string; branch?: Branch }>;
+  loginWithPin: (pin: string) => Promise<{ success: boolean; error?: string; branch?: Branch }>;
   logout: () => void;
   hasPermission: (permission: string) => boolean;
 }
@@ -26,25 +27,55 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(false);
 
-  const login = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+  // Resolve the assigned branch for a staff member from pos_staff table
+  const resolveStaffBranch = async (email: string, staffId?: string): Promise<Branch | null> => {
+    try {
+      const supabase = getSupabaseClient();
+      let query = supabase.from('pos_staff').select('branch_id, branch_name').limit(1);
+      if (staffId) query = query.eq('id', staffId);
+      else query = query.eq('email', email.toLowerCase().trim());
+      const { data } = await query.maybeSingle();
+      if (data?.branch_id) {
+        const found = BRANCHES.find(b => b.id === data.branch_id);
+        return found || null;
+      }
+    } catch {}
+    return null;
+  };
+
+  const login = async (email: string, password: string): Promise<{ success: boolean; error?: string; branch?: Branch }> => {
     setIsLoading(true);
     try {
-      // First attempt Supabase auth
       const supabase = getSupabaseClient();
+
+      // Try Supabase auth first
       const { data, error } = await supabase.auth.signInWithPassword({ email: email.toLowerCase().trim(), password });
 
       if (!error && data.user) {
-        // Look up POS user profile by email
+        // Look up staff record in pos_staff by auth_user_id or email
+        const { data: staffRow } = await supabase
+          .from('pos_staff')
+          .select('id, name, role, pin, branch_id, branch_name')
+          .or(`auth_user_id.eq.${data.user.id},email.eq.${email.toLowerCase().trim()}`)
+          .eq('status', 'active')
+          .maybeSingle();
+
         const mockUser = MOCK_USERS.find(u => u.email.toLowerCase() === email.toLowerCase().trim());
         const posUser: User = {
           id: data.user.id,
-          name: mockUser?.name || data.user.email?.split('@')[0] || 'User',
+          name: staffRow?.name || mockUser?.name || data.user.email?.split('@')[0] || 'User',
           email: data.user.email || email,
-          role: (mockUser?.role as UserRole) || 'Cashier',
-          pin: mockUser?.pin,
+          role: (staffRow?.role as UserRole) || (mockUser?.role as UserRole) || 'Cashier',
+          pin: staffRow?.pin || mockUser?.pin,
         };
         setUser(posUser);
-        return { success: true };
+
+        // Resolve assigned branch
+        const assignedBranch = staffRow?.branch_id
+          ? (BRANCHES.find(b => b.id === staffRow.branch_id) || null)
+          : await resolveStaffBranch(email);
+
+        return { success: true, branch: assignedBranch || undefined };
       }
 
       // Fallback: local mock auth
@@ -53,11 +84,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       );
       if (mockUser) {
         setUser({ id: mockUser.id, name: mockUser.name, email: mockUser.email, role: mockUser.role as UserRole, pin: mockUser.pin });
-        return { success: true };
+        const branch = await resolveStaffBranch(email);
+        return { success: true, branch: branch || undefined };
       }
       return { success: false, error: 'Invalid email or password.' };
     } catch {
-      // Pure mock fallback
       const mockUser = MOCK_USERS.find(
         u => u.email.toLowerCase() === email.toLowerCase().trim() && u.password === password
       );
@@ -71,19 +102,56 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  const loginWithPin = async (pin: string): Promise<{ success: boolean; error?: string }> => {
+  const loginWithPin = async (pin: string): Promise<{ success: boolean; error?: string; branch?: Branch }> => {
     setIsLoading(true);
-    await new Promise(r => setTimeout(r, 300));
-    const matchedUser = MOCK_USERS.find(u => u.pin === pin);
-    setIsLoading(false);
-    if (matchedUser) {
-      if (!user || user.pin !== pin) {
-        setUser({ id: matchedUser.id, name: matchedUser.name, email: matchedUser.email, role: matchedUser.role as UserRole, pin: matchedUser.pin });
+    try {
+      // Try to find pin in pos_staff (cloud)
+      const supabase = getSupabaseClient();
+      const { data: staffRow } = await supabase
+        .from('pos_staff')
+        .select('id, name, email, role, pin, branch_id, branch_name')
+        .eq('pin', pin)
+        .eq('status', 'active')
+        .maybeSingle();
+
+      if (staffRow) {
+        const posUser: User = {
+          id: staffRow.id,
+          name: staffRow.name,
+          email: staffRow.email,
+          role: staffRow.role as UserRole,
+          pin: staffRow.pin,
+        };
+        setUser(posUser);
+        const assignedBranch = staffRow.branch_id
+          ? (BRANCHES.find(b => b.id === staffRow.branch_id) || null)
+          : null;
+        return { success: true, branch: assignedBranch || undefined };
       }
-      return { success: true };
+
+      // Fallback: mock
+      await new Promise(r => setTimeout(r, 200));
+      const matchedUser = MOCK_USERS.find(u => u.pin === pin);
+      if (matchedUser) {
+        if (!user || user.pin !== pin) {
+          setUser({ id: matchedUser.id, name: matchedUser.name, email: matchedUser.email, role: matchedUser.role as UserRole, pin: matchedUser.pin });
+        }
+        const branch = await resolveStaffBranch(matchedUser.email);
+        return { success: true, branch: branch || undefined };
+      }
+      if (user && user.pin === pin) return { success: true };
+      return { success: false, error: 'Invalid PIN.' };
+    } catch {
+      await new Promise(r => setTimeout(r, 200));
+      const matchedUser = MOCK_USERS.find(u => u.pin === pin);
+      if (matchedUser) {
+        setUser({ id: matchedUser.id, name: matchedUser.name, email: matchedUser.email, role: matchedUser.role as UserRole, pin: matchedUser.pin });
+        return { success: true };
+      }
+      return { success: false, error: 'Invalid PIN.' };
+    } finally {
+      setIsLoading(false);
     }
-    if (user && user.pin === pin) return { success: true };
-    return { success: false, error: 'Invalid PIN.' };
   };
 
   const logout = () => {

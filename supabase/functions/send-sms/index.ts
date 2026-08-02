@@ -4,6 +4,11 @@ import { corsHeaders } from '../_shared/cors.ts';
 const AT_API_KEY = Deno.env.get('AFRICA_TALKING_API_KEY') ?? '';
 const AT_USERNAME = Deno.env.get('AFRICA_TALKING_USERNAME') ?? '';
 
+// Africa's Talking API endpoint — use sandbox for sandbox username
+const AT_API_URL = AT_USERNAME === 'sandbox'
+  ? 'https://api.sandbox.africastalking.com/version1/messaging'
+  : 'https://api.africastalking.com/version1/messaging';
+
 interface SMSPayload {
   phone: string;
   message: string;
@@ -48,14 +53,19 @@ serve(async (req) => {
     // Send via Africa's Talking API
     if (AT_API_KEY && AT_USERNAME) {
       try {
-        const atBody = new URLSearchParams({
+        // Build form body — omit 'from' for default shortcode (avoids sender ID rejection)
+        const formData: Record<string, string> = {
           username: AT_USERNAME,
           to: formattedPhone,
           message: message,
-          from: 'HesaGift',
-        });
+        };
+        // Only add sender ID if not sandbox (sandbox ignores it)
+        if (AT_USERNAME !== 'sandbox') {
+          formData['from'] = 'HesaGift';
+        }
+        const atBody = new URLSearchParams(formData);
 
-        const atRes = await fetch('https://api.africastalking.com/version1/messaging', {
+        const atRes = await fetch(AT_API_URL, {
           method: 'POST',
           headers: {
             'Accept': 'application/json',
@@ -65,15 +75,26 @@ serve(async (req) => {
           body: atBody.toString(),
         });
 
-        atResult = await atRes.json();
+        const rawText = await atRes.text();
+        console.log('AT raw response:', rawText);
+        try {
+          atResult = JSON.parse(rawText);
+        } catch {
+          atResult = { raw: rawText };
+        }
 
         const recipient = atResult?.SMSMessageData?.Recipients?.[0];
-        if (recipient?.status === 'Success' || recipient?.statusCode === '101') {
+        // statusCode 101 = sent, 102 = sent to queue
+        if (recipient && (recipient.status === 'Success' || recipient.statusCode === '101' || recipient.statusCode === '102' || Number(recipient.statusCode) === 101 || Number(recipient.statusCode) === 102)) {
           status = 'sent';
           atId = recipient.messageId || null;
           cost = recipient.cost || null;
+        } else if (atRes.ok && atResult?.SMSMessageData?.Message === 'Sent to 1/1 Total Cost: ...' ) {
+          status = 'sent';
         } else {
-          errorMsg = recipient?.status || 'SMS delivery failed';
+          const errStatus = recipient?.status || atResult?.SMSMessageData?.Message || `HTTP ${atRes.status}`;
+          errorMsg = `AT Error: ${errStatus} | Body: ${rawText.slice(0, 200)}`;
+          console.error('AT delivery failed:', errorMsg);
         }
       } catch (err) {
         errorMsg = `Africa's Talking: ${String(err)}`;

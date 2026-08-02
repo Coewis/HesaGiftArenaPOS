@@ -23,6 +23,7 @@ const CHART_W = isDesktop ? Math.min(520, SCREEN_WIDTH * 0.45) : isTablet ? SCRE
 
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
 type Period = 'today' | 'week' | 'month' | 'financial';
+type ChartTab = 'bar' | 'line' | 'pie' | 'branches';
 
 const CHART_CONFIG = {
   backgroundColor: Colors.navyCard,
@@ -48,12 +49,18 @@ const REFUND_METHODS = [
   { key: 'Original Method', label: 'Original Method', color: Colors.skyBlue },
 ];
 
-// Payment method breakdown for pie chart
 const PAYMENT_PIE_DATA = [
   { name: 'Cash', population: 38, color: Colors.success, legendFontColor: Colors.textSecondary, legendFontSize: 11 },
   { name: 'MTN MoMo', population: 32, color: '#FFCC00', legendFontColor: Colors.textSecondary, legendFontSize: 11 },
   { name: 'Airtel', population: 18, color: Colors.airtel, legendFontColor: Colors.textSecondary, legendFontSize: 11 },
   { name: 'Card', population: 12, color: Colors.skyBlue, legendFontColor: Colors.textSecondary, legendFontSize: 11 },
+];
+
+const CHART_TABS: { key: ChartTab; icon: string; label: string }[] = [
+  { key: 'bar', icon: 'bar-chart', label: 'Bar' },
+  { key: 'line', icon: 'show-chart', label: 'Trend' },
+  { key: 'pie', icon: 'pie-chart', label: 'Split' },
+  { key: 'branches', icon: 'store', label: 'Branches' },
 ];
 
 export default function ReportsScreen() {
@@ -67,9 +74,8 @@ export default function ReportsScreen() {
   const [showBranchFilter, setShowBranchFilter] = useState(false);
   const [showEODModal, setShowEODModal] = useState(false);
   const [generatingEOD, setGeneratingEOD] = useState(false);
-  const [activeChartTab, setActiveChartTab] = useState<'bar' | 'line' | 'pie'>('bar');
+  const [activeChartTab, setActiveChartTab] = useState<ChartTab>('bar');
 
-  // Refund state
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [refundSale, setRefundSale] = useState<SaleRecord | null>(null);
   const [refundItems, setRefundItems] = useState<Record<string, number>>({});
@@ -83,19 +89,16 @@ export default function ReportsScreen() {
     return { revenue: DASHBOARD_STATS.thisMonth.revenue, transactions: DASHBOARD_STATS.thisMonth.transactions, avg: Math.round(DASHBOARD_STATS.thisMonth.revenue / DASHBOARD_STATS.thisMonth.transactions) };
   }, [period]);
 
-  // ─── Financial Report Data ─────────────────────────────────────────────────
   const financialData = useMemo(() => {
     const monthSales = sales.filter(s => s.timestamp.startsWith(financialMonth) && s.status === 'completed');
     const monthRefunds = sales.filter(s => s.timestamp.startsWith(financialMonth) && s.status === 'refunded');
     const totalRevenue = monthSales.reduce((sum, s) => sum + s.total, 0);
     const totalRefunds = monthRefunds.reduce((sum, s) => sum + s.total, 0);
     const totalDiscount = monthSales.reduce((sum, s) => sum + (s.discount || 0), 0);
-    const cogs = monthSales.reduce((sum, s) => {
-      return sum + s.items.reduce((is, i) => {
-        const prod = products.find(p => p.id === i.productId);
-        return is + (prod ? prod.buyingPrice * i.qty : 0);
-      }, 0);
-    }, 0);
+    const cogs = monthSales.reduce((sum, s) => sum + s.items.reduce((is, i) => {
+      const prod = products.find(p => p.id === i.productId);
+      return is + (prod ? prod.buyingPrice * i.qty : 0);
+    }, 0), 0);
     const grossProfit = totalRevenue - cogs;
     const netProfit = grossProfit - totalRefunds;
     const inventoryValue = products.filter(p => p.status === 'active').reduce((sum, p) => sum + p.buyingPrice * p.stock, 0);
@@ -117,6 +120,15 @@ export default function ReportsScreen() {
     })).filter(p => p.count > 0);
     return { totalRevenue, totalRefunds, totalDiscount, cogs, grossProfit, netProfit, inventoryValue, inventoryRetailValue, topSelling, slowMoving, paymentBreakdownFin, transactionCount: monthSales.length };
   }, [sales, products, financialMonth]);
+
+  // Multi-branch grouped bar data
+  const branchBarData = useMemo(() => {
+    const weights = [0.30, 0.22, 0.18, 0.17, 0.13];
+    return branches.map((branch, bi) => ({
+      branch,
+      values: DASHBOARD_STATS.weeklyRevenue.map(v => Math.round(v * weights[bi] / 10000) / 100),
+    }));
+  }, [branches]);
 
   const buildFinancialReportHTML = () => {
     const monthLabel = new Date(financialMonth + '-01').toLocaleDateString('en-UG', { year: 'numeric', month: 'long' });
@@ -140,7 +152,7 @@ table{width:100%;border-collapse:collapse;}th{background:#0A1F0E;color:#22C55E;p
 <div class="kcard"><div class="kval">UGX ${financialData.totalRevenue.toLocaleString()}</div><div class="klbl">Total Revenue</div></div>
 <div class="kcard"><div class="kval" style="color:#E55">${financialData.totalRefunds > 0 ? '-' : ''}UGX ${financialData.totalRefunds.toLocaleString()}</div><div class="klbl">Refunds</div></div>
 <div class="kcard"><div class="kval">UGX ${financialData.cogs.toLocaleString()}</div><div class="klbl">Cost of Goods Sold</div></div>
-<div class="kcard"><div class="kval" class="big ${financialData.netProfit >= 0 ? 'pos' : 'neg'}">UGX ${financialData.netProfit.toLocaleString()}</div><div class="klbl">Net Profit</div></div>
+<div class="kcard"><div class="kval">UGX ${financialData.netProfit.toLocaleString()}</div><div class="klbl">Net Profit</div></div>
 </div>
 <table><tr><th>Line Item</th><th>Amount (UGX)</th></tr>
 <tr><td>Gross Revenue</td><td class="hi">${financialData.totalRevenue.toLocaleString()}</td></tr>
@@ -153,8 +165,8 @@ table{width:100%;border-collapse:collapse;}th{background:#0A1F0E;color:#22C55E;p
 </table></div>
 <div class="section"><div class="st">Inventory Valuation</div>
 <table><tr><th>Metric</th><th>Value</th></tr>
-<tr><td>Stock at Cost (Buying Price)</td><td class="hi">UGX ${financialData.inventoryValue.toLocaleString()}</td></tr>
-<tr><td>Stock at Retail (Selling Price)</td><td class="hi">UGX ${financialData.inventoryRetailValue.toLocaleString()}</td></tr>
+<tr><td>Stock at Cost</td><td class="hi">UGX ${financialData.inventoryValue.toLocaleString()}</td></tr>
+<tr><td>Stock at Retail</td><td class="hi">UGX ${financialData.inventoryRetailValue.toLocaleString()}</td></tr>
 <tr><td>Potential Profit if All Sold</td><td class="pos">UGX ${(financialData.inventoryRetailValue - financialData.inventoryValue).toLocaleString()}</td></tr>
 <tr><td>Total Active Products</td><td>${products.filter(p => p.status === 'active').length}</td></tr>
 </table></div>
@@ -181,30 +193,16 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
   const weekDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
   const weeklyRevInMillions = DASHBOARD_STATS.weeklyRevenue.map(v => parseFloat((v / 1000000).toFixed(2)));
 
-  // Bar chart data - daily revenue (in millions UGX)
   const barChartData = {
     labels: weekDays,
-    datasets: [{
-      data: weeklyRevInMillions,
-      colors: DASHBOARD_STATS.weeklyRevenue.map((_, i) =>
-        i === DASHBOARD_STATS.weeklyRevenue.length - 1
-          ? () => Colors.gold
-          : () => Colors.skyBlue + 'cc'
-      ),
-    }],
+    datasets: [{ data: weeklyRevInMillions }],
   };
 
-  // Line chart data - 7-day trend
   const lineChartData = {
     labels: weekDays,
-    datasets: [{
-      data: weeklyRevInMillions,
-      color: (opacity = 1) => `rgba(212,175,55,${opacity})`,
-      strokeWidth: 2.5,
-    }],
+    datasets: [{ data: weeklyRevInMillions, color: (opacity = 1) => `rgba(212,175,55,${opacity})`, strokeWidth: 2.5 }],
   };
 
-  // Top 5 products bar data (units sold)
   const topProductsBarData = {
     labels: DASHBOARD_STATS.topProducts.slice(0, 5).map(p => p.name.split(' ').slice(0, 2).join(' ')),
     datasets: [{ data: DASHBOARD_STATS.topProducts.slice(0, 5).map(p => p.sold) }],
@@ -222,10 +220,7 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
 
   const refundTotal = useMemo(() => {
     if (!refundSale) return 0;
-    return refundSale.items.reduce((sum, item) => {
-      const qty = refundItems[item.productId] || 0;
-      return sum + item.price * qty;
-    }, 0);
+    return refundSale.items.reduce((sum, item) => sum + item.price * (refundItems[item.productId] || 0), 0);
   }, [refundSale, refundItems]);
 
   const handleProcessRefund = async () => {
@@ -252,7 +247,7 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
     .brand{font-size:26px;font-weight:900;color:#B8922E;letter-spacing:2px;}
     .section{margin-bottom:24px;}.section-title{font-size:14px;font-weight:800;color:#B8922E;text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid #E8D5A0;padding-bottom:6px;margin-bottom:12px;}
     .kpi-grid{display:flex;flex-wrap:wrap;gap:12px;}.kpi-box{flex:1;min-width:140px;background:#f8f5ee;border:1px solid #E8D5A0;border-radius:8px;padding:14px;}
-    .kpi-label{font-size:11px;color:#888;text-transform:uppercase;letter-spacing:0.5px;}.kpi-value{font-size:20px;font-weight:900;color:#B8922E;margin-top:4px;}
+    .kpi-label{font-size:11px;color:#888;text-transform:uppercase;}.kpi-value{font-size:20px;font-weight:900;color:#B8922E;margin-top:4px;}
     table{width:100%;border-collapse:collapse;font-size:13px;}th{background:#0A1628;color:#D4AF37;padding:10px 12px;text-align:left;font-weight:700;}td{padding:9px 12px;border-bottom:1px solid #f0f0f0;}.highlight{font-weight:bold;color:#B8922E;}
     .footer{text-align:center;font-size:11px;color:#aaa;margin-top:24px;padding-top:12px;border-top:1px dashed #ddd;}</style></head>
     <body><div class="header"><div class="brand">HESA GIFT ARENA</div><div style="font-size:18px;font-weight:bold;color:#0A1628;margin-top:12px;">END-OF-DAY CLOSING REPORT</div><div style="font-size:13px;color:#555;margin-top:4px;">${today}</div><div style="font-size:11px;color:#999;">Generated: ${new Date().toLocaleString('en-UG')} · By: ${user?.name || 'Manager'}</div></div>
@@ -265,7 +260,7 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
     ${paymentBreakdown.map(p => `<tr><td>${p.method}</td><td class="highlight">UGX ${p.amount.toLocaleString()}</td><td>${p.pct}%</td></tr>`).join('')}</table></div>
     <div class="section"><div class="section-title">Top Products</div><table><tr><th>#</th><th>Product</th><th>Units</th><th>Revenue</th></tr>
     ${DASHBOARD_STATS.topProducts.slice(0, 5).map((p, i) => `<tr><td><strong>${i + 1}</strong></td><td>${p.name}</td><td>${p.sold}</td><td class="highlight">UGX ${p.revenue.toLocaleString()}</td></tr>`).join('')}</table></div>
-    <div class="footer"><strong>HESA GIFT ARENA POS System</strong> · End of Day Report · ${today}<br/>This document is confidential. For internal use only.</div>
+    <div class="footer"><strong>HESA GIFT ARENA POS System</strong> · End of Day Report · ${today}<br/>Confidential. For internal use only.</div>
     </body></html>`;
   };
 
@@ -289,22 +284,20 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
     <View style={styles.chartCard}>
       <View style={styles.chartCardHeader}>
         <Text style={styles.sectionTitle}>Revenue Analytics</Text>
-        <View style={styles.chartTabRow}>
-          {([
-            { key: 'bar', icon: 'bar-chart', label: 'Bar' },
-            { key: 'line', icon: 'show-chart', label: 'Trend' },
-            { key: 'pie', icon: 'pie-chart', label: 'Split' },
-          ] as { key: 'bar' | 'line' | 'pie'; icon: string; label: string }[]).map(t => (
-            <TouchableOpacity
-              key={t.key}
-              style={[styles.chartTabBtn, activeChartTab === t.key && styles.chartTabBtnActive]}
-              onPress={() => setActiveChartTab(t.key)}
-            >
-              <MaterialIcons name={t.icon as any} size={14} color={activeChartTab === t.key ? Colors.navy : Colors.textMuted} />
-              <Text style={[styles.chartTabText, activeChartTab === t.key && { color: Colors.navy, fontWeight: Typography.bold }]}>{t.label}</Text>
-            </TouchableOpacity>
-          ))}
-        </View>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          <View style={styles.chartTabRow}>
+            {CHART_TABS.map(t => (
+              <TouchableOpacity
+                key={t.key}
+                style={[styles.chartTabBtn, activeChartTab === t.key && styles.chartTabBtnActive]}
+                onPress={() => setActiveChartTab(t.key)}
+              >
+                <MaterialIcons name={t.icon as any} size={13} color={activeChartTab === t.key ? Colors.navy : Colors.textMuted} />
+                <Text style={[styles.chartTabText, activeChartTab === t.key && { color: Colors.navy, fontWeight: Typography.bold }]}>{t.label}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        </ScrollView>
       </View>
 
       {activeChartTab === 'bar' && (
@@ -363,6 +356,58 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
           </View>
         </View>
       )}
+
+      {activeChartTab === 'branches' && (
+        <View style={{ gap: 10 }}>
+          <Text style={styles.chartSubtitle}>All 5 Branches — Daily Revenue (millions UGX) · Past 7 Days</Text>
+          {/* Branch legend */}
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {branches.map(b => (
+              <View key={b.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <View style={{ width: 10, height: 10, borderRadius: 2, backgroundColor: b.color }} />
+                <Text style={{ fontSize: 10, color: Colors.textSecondary }}>{b.shortName}</Text>
+              </View>
+            ))}
+          </View>
+          {/* Grouped bars per day */}
+          <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+            <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 8, paddingVertical: 8, paddingHorizontal: 4 }}>
+              {weekDays.map((day, di) => {
+                const maxV = Math.max(...branchBarData.map(b => b.values[di]), 0.01);
+                return (
+                  <View key={day} style={{ alignItems: 'center', gap: 4 }}>
+                    <View style={{ flexDirection: 'row', alignItems: 'flex-end', gap: 2, height: 80 }}>
+                      {branchBarData.map(({ branch, values }) => {
+                        const barH = Math.max(4, (values[di] / maxV) * 72);
+                        return <View key={branch.id} style={{ width: 8, height: barH, borderRadius: 2, backgroundColor: branch.color, opacity: 0.85 }} />;
+                      })}
+                    </View>
+                    <Text style={{ fontSize: 9, color: Colors.textMuted, width: 46, textAlign: 'center' }}>{day}</Text>
+                  </View>
+                );
+              })}
+            </View>
+          </ScrollView>
+          {/* Weekly totals per branch with progress bar */}
+          <View style={{ gap: 5, marginTop: 4 }}>
+            {branchBarData.map(({ branch, values }) => {
+              const weekTotal = values.reduce((s, v) => s + v, 0);
+              const maxTotal = Math.max(...branchBarData.map(b => b.values.reduce((s, v) => s + v, 0)), 0.01);
+              const pct = Math.round((weekTotal / maxTotal) * 100);
+              return (
+                <View key={branch.id} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                  <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: branch.color }} />
+                  <Text style={{ width: 72, fontSize: 11, color: Colors.textSecondary }} numberOfLines={1}>{branch.shortName}</Text>
+                  <View style={{ flex: 1, height: 6, backgroundColor: Colors.navyLight, borderRadius: 3, overflow: 'hidden' }}>
+                    <View style={{ width: `${pct}%`, height: '100%', backgroundColor: branch.color, borderRadius: 3 }} />
+                  </View>
+                  <Text style={{ fontSize: 11, fontWeight: Typography.bold, color: branch.color, minWidth: 44, textAlign: 'right' }}>{weekTotal.toFixed(1)}M</Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      )}
     </View>
   );
 
@@ -390,10 +435,8 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
 
   const renderDesktopLayout = () => (
     <View style={styles.desktopGrid}>
-      {/* Left column */}
       <View style={styles.desktopCol}>
         {renderCharts()}
-        {/* Payment table */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Payment Breakdown</Text>
           {paymentBreakdown.map(pm => (
@@ -405,7 +448,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
           ))}
         </View>
       </View>
-      {/* Right column */}
       <View style={styles.desktopCol}>
         {renderTopProductsChart()}
         <View style={styles.sectionCard}>
@@ -475,7 +517,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
       )}
 
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={[styles.scroll, isDesktop && { maxWidth: 1200, alignSelf: 'center', width: '100%' }]}>
-        {/* Period Toggle */}
         <View style={styles.periodToggle}>
           {([{ key: 'today', label: 'Today' }, { key: 'week', label: 'This Week' }, { key: 'month', label: 'This Month' }, { key: 'financial', label: 'Financial' }] as { key: Period; label: string }[]).map(p => (
             <TouchableOpacity key={p.key} style={[styles.periodBtn, period === p.key && styles.periodBtnActive]} onPress={() => setPeriod(p.key)}>
@@ -484,7 +525,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
           ))}
         </View>
 
-        {/* Financial Report Period */}
         {period === 'financial' && (
           <View style={styles.financialMonthRow}>
             <TouchableOpacity style={styles.financialMonthBtn} onPress={() => {
@@ -519,26 +559,24 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
           </View>
         )}
 
-        {/* KPI Cards */}
         {period !== 'financial' && (
           <View style={styles.kpiRow}>
-          {[
-            { label: 'Total Revenue', value: formatUGX(stats.revenue), icon: 'attach-money', color: Colors.gold, bg: Colors.goldMuted },
-            { label: 'Transactions', value: String(stats.transactions), icon: 'receipt-long', color: Colors.skyBlue, bg: Colors.skyBlueMuted },
-            { label: 'Avg Order Value', value: formatUGX(stats.avg), icon: 'trending-up', color: Colors.success, bg: Colors.successMuted },
-          ].map(k => (
-            <View key={k.label} style={[styles.kpiCard, { borderColor: k.color + '30' }]}>
-              <View style={[styles.kpiIcon, { backgroundColor: k.bg }]}><MaterialIcons name={k.icon as any} size={20} color={k.color} /></View>
-              <Text style={[styles.kpiValue, { color: k.color }]}>{k.value}</Text>
-              <Text style={styles.kpiLabel}>{k.label}</Text>
-            </View>
-          ))}
-        </View>
-
+            {[
+              { label: 'Total Revenue', value: formatUGX(stats.revenue), icon: 'attach-money', color: Colors.gold, bg: Colors.goldMuted },
+              { label: 'Transactions', value: String(stats.transactions), icon: 'receipt-long', color: Colors.skyBlue, bg: Colors.skyBlueMuted },
+              { label: 'Avg Order Value', value: formatUGX(stats.avg), icon: 'trending-up', color: Colors.success, bg: Colors.successMuted },
+            ].map(k => (
+              <View key={k.label} style={[styles.kpiCard, { borderColor: k.color + '30' }]}>
+                <View style={[styles.kpiIcon, { backgroundColor: k.bg }]}><MaterialIcons name={k.icon as any} size={20} color={k.color} /></View>
+                <Text style={[styles.kpiValue, { color: k.color }]}>{k.value}</Text>
+                <Text style={styles.kpiLabel}>{k.label}</Text>
+              </View>
+            ))}
+          </View>
         )}
+
         {period === 'financial' && (
           <View style={styles.financialSection}>
-            {/* Income Statement Cards */}
             <View style={styles.financialCardRow}>
               {[
                 { label: 'Total Revenue', value: formatUGX(financialData.totalRevenue), color: Colors.gold, icon: 'attach-money' },
@@ -554,7 +592,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
               ))}
             </View>
 
-            {/* Income Statement Table */}
             <View style={styles.finTable}>
               <View style={styles.finTableHeader}>
                 <MaterialIcons name="receipt-long" size={14} color={Colors.gold} />
@@ -578,7 +615,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
               ))}
             </View>
 
-            {/* Inventory Valuation */}
             <View style={styles.finTable}>
               <View style={styles.finTableHeader}>
                 <MaterialIcons name="inventory" size={14} color={Colors.skyBlue} />
@@ -596,7 +632,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
               ))}
             </View>
 
-            {/* Top Selling */}
             <View style={styles.finTable}>
               <View style={styles.finTableHeader}>
                 <MaterialIcons name="star" size={14} color={Colors.gold} />
@@ -618,7 +653,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
               ))}
             </View>
 
-            {/* Slow Moving */}
             {financialData.slowMoving.length > 0 && (
               <View style={[styles.finTable, { borderColor: Colors.warning + '40' }]}>
                 <View style={styles.finTableHeader}>
@@ -637,7 +671,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
               </View>
             )}
 
-            {/* Cash Flow by Payment */}
             <View style={styles.finTable}>
               <View style={styles.finTableHeader}>
                 <MaterialIcons name="account-balance-wallet" size={14} color={Colors.success} />
@@ -655,12 +688,11 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
             </View>
           </View>
         )}
+
         {isDesktop ? renderDesktopLayout() : (
           <>
             {renderCharts()}
             {renderTopProductsChart()}
-
-            {/* Payment breakdown */}
             <View style={styles.sectionCard}>
               <Text style={styles.sectionTitle}>Payment Breakdown</Text>
               {paymentBreakdown.map(pm => (
@@ -671,8 +703,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
                 </View>
               ))}
             </View>
-
-            {/* Top Products */}
             <View style={styles.sectionCard}>
               <Text style={styles.sectionTitle}>Top Selling Products</Text>
               {DASHBOARD_STATS.topProducts.map((p, i) => (
@@ -688,7 +718,6 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
           </>
         )}
 
-        {/* Recent Transactions */}
         <View style={styles.sectionCard}>
           <Text style={styles.sectionTitle}>Recent Transactions</Text>
           {sales.slice(0, isDesktop ? 15 : 10).map(sale => {
@@ -696,8 +725,8 @@ ${financialData.paymentBreakdownFin.map(p => `<tr><td>${p.method}</td><td>${p.co
             const isCompleted = sale.status === 'completed';
             return (
               <View key={sale.id} style={styles.txRow}>
-                <View style={[styles.txIcon, { backgroundColor: isRefunded ? Colors.dangerMuted : sale.paymentMethod === 'Cash' ? Colors.successMuted : sale.paymentMethod === 'Split' ? Colors.goldMuted : Colors.skyBlueMuted }]}>
-                  <MaterialIcons name={isRefunded ? 'undo' : sale.paymentMethod === 'Cash' ? 'payments' : sale.paymentMethod === 'Card' ? 'credit-card' : sale.paymentMethod === 'Split' ? 'call-split' : 'phone-android'} size={16} color={isRefunded ? Colors.danger : sale.paymentMethod === 'Cash' ? Colors.success : sale.paymentMethod === 'MTN MoMo' ? '#FFCC00' : sale.paymentMethod === 'Split' ? Colors.gold : Colors.skyBlue} />
+                <View style={[styles.txIcon, { backgroundColor: isRefunded ? Colors.dangerMuted : sale.paymentMethod === 'Cash' ? Colors.successMuted : Colors.skyBlueMuted }]}>
+                  <MaterialIcons name={isRefunded ? 'undo' : sale.paymentMethod === 'Cash' ? 'payments' : sale.paymentMethod === 'Card' ? 'credit-card' : 'phone-android'} size={16} color={isRefunded ? Colors.danger : sale.paymentMethod === 'Cash' ? Colors.success : Colors.skyBlue} />
                 </View>
                 <View style={styles.txInfo}>
                   <Text style={styles.txReceipt}>{sale.receiptNo}</Text>
@@ -854,7 +883,6 @@ const styles = StyleSheet.create({
   branchDropdownDot: { width: 8, height: 8, borderRadius: 4 },
   branchDropdownChipText: { fontSize: Typography.xs, color: Colors.textSecondary },
   scroll: { padding: Spacing.base, gap: Spacing.md },
-  // Desktop
   desktopGrid: { flexDirection: 'row', gap: 16 },
   desktopCol: { flex: 1, gap: 16 },
   periodToggle: { flexDirection: 'row', backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, padding: 4, borderWidth: 1, borderColor: Colors.border },
@@ -867,11 +895,10 @@ const styles = StyleSheet.create({
   kpiIcon: { width: 40, height: 40, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   kpiValue: { fontSize: 13, fontWeight: Typography.extrabold, textAlign: 'center' },
   kpiLabel: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'center' },
-  // Charts
   chartCard: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, padding: Spacing.base, gap: Spacing.sm, ...Shadows.sm },
   chartCardHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: 8 },
   chartTabRow: { flexDirection: 'row', backgroundColor: Colors.navyLight, borderRadius: BorderRadius.md, padding: 3, gap: 3 },
-  chartTabBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.sm },
+  chartTabBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: 8, paddingVertical: 6, borderRadius: BorderRadius.sm },
   chartTabBtnActive: { backgroundColor: Colors.gold },
   chartTabText: { fontSize: 11, color: Colors.textMuted },
   chartSubtitle: { fontSize: Typography.xs, color: Colors.textMuted, marginBottom: 4 },
@@ -918,7 +945,6 @@ const styles = StyleSheet.create({
   eodBannerLeft: { flexDirection: 'row', alignItems: 'center', gap: Spacing.md, flex: 1 },
   eodBannerTitle: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.gold },
   eodBannerSub: { fontSize: Typography.xs, color: Colors.textMuted },
-  // Modals
   modalOverlay: { flex: 1, backgroundColor: Colors.overlay, justifyContent: 'flex-end' },
   modalTitle: { fontSize: Typography.xl, fontWeight: Typography.bold, color: Colors.gold },
   refundModal: { backgroundColor: Colors.navyMid, borderTopLeftRadius: BorderRadius.xxl, borderTopRightRadius: BorderRadius.xxl, maxHeight: '88%', borderTopWidth: 2, borderColor: Colors.warning + '60' },
@@ -967,7 +993,6 @@ const styles = StyleSheet.create({
   eodActions: { flexDirection: 'row', gap: 12, padding: Spacing.xl, borderTopWidth: 1, borderTopColor: Colors.divider },
   eodActionBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 14, borderRadius: BorderRadius.md, borderWidth: 1 },
   eodActionText: { fontSize: Typography.base, fontWeight: Typography.bold },
-  // Financial Report
   financialMonthRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.borderGold, paddingHorizontal: Spacing.md, paddingVertical: 8 },
   financialMonthBtn: { padding: 4 },
   financialMonthLabel: { flex: 1, textAlign: 'center', fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary },

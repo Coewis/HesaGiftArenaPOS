@@ -14,6 +14,7 @@ import * as Notifications from 'expo-notifications';
 import { useCart } from '@/hooks/useCart';
 import { usePOS } from '@/hooks/usePOS';
 import { useAuth } from '@/hooks/useAuth';
+import { sendReceiptSMS } from '@/services/smsService';
 import { useBranch } from '@/hooks/useBranch';
 import { useShift } from '@/hooks/useShift';
 import { useOfflineSync } from '@/hooks/useOfflineSync';
@@ -393,6 +394,53 @@ export default function POSScreen() {
 
     // Record in active shift
     recordSaleInShift(total);
+
+    // ─── Auto SMS receipt to customer ──────────────────────────────────────
+    if (customer?.phone) {
+      sendReceiptSMS({
+        phone: customer.phone,
+        customerName: customer.name,
+        customerId: customer.id,
+        receiptNo: sale.receiptNo,
+        total: sale.total,
+        items: sale.items.map(i => ({ name: i.name, qty: i.qty })),
+        branchName: currentBranch.name,
+      }).then(result => {
+        if (result.success) {
+          // Brief non-blocking toast via notification
+          Notifications.scheduleNotificationAsync({
+            content: { title: 'Receipt SMS Sent', body: `SMS receipt sent to ${customer.name} (${customer.phone})` },
+            trigger: null,
+          }).catch(() => {});
+        }
+      }).catch(() => {});
+    }
+
+    // ─── Low stock SMS to manager ──────────────────────────────────────────
+    // Fetch manager phone from settings then send SMS for any product that just went low
+    (async () => {
+      try {
+        const { getSupabaseClient } = await import('@/template');
+        const db = getSupabaseClient();
+        const { data: settings } = await db.from('pos_settings').select('store_phone').eq('id', 'global').maybeSingle();
+        const managerPhone = (settings?.store_phone || '0748152333').replace(/\s/g, '');
+        // Check for products that dropped to/below minStock in this sale
+        const lowProds = getLowStockProducts().filter(p => sale.items.some(i => i.productId === p.id));
+        for (const prod of lowProds) {
+          const alertMsg = prod.stock === 0
+            ? `STOCK ALERT: ${prod.name} is OUT OF STOCK at ${currentBranch.name}. Restock immediately!`
+            : `LOW STOCK: ${prod.name} has only ${prod.stock} unit(s) left at ${currentBranch.name}. Min: ${prod.minStock}.`;
+          await db.functions.invoke('send-sms', {
+            body: {
+              phone: managerPhone,
+              message: alertMsg,
+              message_type: 'loyalty',
+              customer_name: 'Store Manager',
+            },
+          });
+        }
+      } catch {}
+    })();
 
     setCompletedSale(sale);
     clearCart();

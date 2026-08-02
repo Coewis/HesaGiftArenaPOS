@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList,
   StyleSheet, Modal, ScrollView, TextInput, ActivityIndicator,
@@ -49,6 +49,12 @@ export default function OrdersScreen() {
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [showDetail, setShowDetail] = useState(false);
 
+  // Receipt search state
+  const [showReceiptSearch, setShowReceiptSearch] = useState(false);
+  const [receiptSearchQuery, setReceiptSearchQuery] = useState('');
+  const [receiptSearchResult, setReceiptSearchResult] = useState<Order | null>(null);
+  const [receiptSearchDone, setReceiptSearchDone] = useState(false);
+
   // Rider assignment modal state
   const [showRiderModal, setShowRiderModal] = useState(false);
   const [riderOrderId, setRiderOrderId] = useState('');
@@ -56,6 +62,8 @@ export default function OrdersScreen() {
   const [riderPhone, setRiderPhone] = useState('');
   const [riderNotes, setRiderNotes] = useState('');
   const [assigningRider, setAssigningRider] = useState(false);
+  const [riderRosterSearch, setRiderRosterSearch] = useState('');
+  const [ridersRoster, setRidersRoster] = useState<Array<{ id: string; name: string; phone: string }>>([]);
 
   // Rider history modal
   const [showRiderHistory, setShowRiderHistory] = useState(false);
@@ -87,9 +95,43 @@ export default function OrdersScreen() {
 
   const openDetail = (order: Order) => { setSelectedOrder(order); setShowDetail(true); };
 
+  const handleReceiptSearch = () => {
+    const q = receiptSearchQuery.trim().toLowerCase();
+    if (!q) return;
+    const found = orders.find(o =>
+      o.orderNo.toLowerCase().includes(q) ||
+      o.customerPhone.replace(/\s/g, '').includes(q.replace(/\s/g, '')) ||
+      o.customerName.toLowerCase().includes(q)
+    );
+    setReceiptSearchResult(found || null);
+    setReceiptSearchDone(true);
+  };
+
+  useEffect(() => {
+    if (!showRiderModal) return;
+    (async () => {
+      try {
+        const { getSupabaseClient } = await import('@/template');
+        const { data } = await getSupabaseClient()
+          .from('pos_riders')
+          .select('id, name, phone')
+          .eq('status', 'active')
+          .order('name');
+        setRidersRoster((data || []) as Array<{ id: string; name: string; phone: string }>);
+      } catch {}
+    })();
+  }, [showRiderModal]);
+
+  const filteredRosterRiders = useMemo(() => {
+    if (!riderRosterSearch.trim()) return ridersRoster;
+    const q = riderRosterSearch.toLowerCase();
+    return ridersRoster.filter(r => r.name.toLowerCase().includes(q) || r.phone.includes(q));
+  }, [ridersRoster, riderRosterSearch]);
+
   const openRiderAssignment = (orderId: string) => {
     setRiderOrderId(orderId);
     setRiderName(''); setRiderPhone(''); setRiderNotes('');
+    setRiderRosterSearch('');
     setShowRiderModal(true);
   };
 
@@ -206,6 +248,12 @@ export default function OrdersScreen() {
           />
           {search.length > 0 && <TouchableOpacity onPress={() => setSearch('')}><MaterialIcons name="close" size={14} color={Colors.textMuted} /></TouchableOpacity>}
         </View>
+        <TouchableOpacity
+          style={styles.receiptSearchBtn}
+          onPress={() => { setReceiptSearchQuery(''); setReceiptSearchResult(null); setReceiptSearchDone(false); setShowReceiptSearch(true); }}
+        >
+          <MaterialIcons name="receipt" size={18} color={Colors.skyBlue} />
+        </TouchableOpacity>
       </View>
 
       {/* Status Filter */}
@@ -517,10 +565,87 @@ export default function OrdersScreen() {
         </View>
       </Modal>
 
+      {/* ===== RECEIPT SEARCH MODAL ===== */}
+      <Modal visible={showReceiptSearch} transparent animationType="slide">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.riderModal, { maxHeight: '80%' }]}>
+            <View style={styles.riderModalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="receipt" size={20} color={Colors.skyBlue} />
+                <Text style={[styles.riderModalTitle, { color: Colors.skyBlue }]}>Receipt / Order Lookup</Text>
+              </View>
+              <TouchableOpacity onPress={() => setShowReceiptSearch(false)}>
+                <MaterialIcons name="close" size={20} color={Colors.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <View style={{ padding: Spacing.xl, gap: Spacing.md }}>
+              <Text style={{ fontSize: Typography.xs, color: Colors.textMuted }}>Search by order number, customer name, or phone to resolve complaints.</Text>
+              <View style={{ flexDirection: 'row', gap: 8 }}>
+                <View style={[styles.searchBox, { flex: 1 }]}>
+                  <MaterialIcons name="search" size={16} color={Colors.textMuted} />
+                  <TextInput
+                    style={styles.searchInput}
+                    placeholder="Order no., name or phone..."
+                    placeholderTextColor={Colors.textMuted}
+                    value={receiptSearchQuery}
+                    onChangeText={setReceiptSearchQuery}
+                    onSubmitEditing={handleReceiptSearch}
+                    autoFocus
+                  />
+                </View>
+                <TouchableOpacity
+                  style={{ backgroundColor: Colors.skyBlue, paddingHorizontal: 14, borderRadius: BorderRadius.md, alignItems: 'center', justifyContent: 'center' }}
+                  onPress={handleReceiptSearch}
+                >
+                  <Text style={{ color: Colors.navy, fontWeight: Typography.bold, fontSize: Typography.sm }}>Find</Text>
+                </TouchableOpacity>
+              </View>
+              {receiptSearchResult ? (
+                <View style={{ backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1.5, borderColor: Colors.skyBlue + '50', overflow: 'hidden' }}>
+                  <View style={{ backgroundColor: Colors.skyBlueMuted, paddingHorizontal: Spacing.md, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <MaterialIcons name="check-circle" size={16} color={Colors.skyBlue} />
+                    <Text style={{ fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.skyBlue }}>Order Found</Text>
+                  </View>
+                  <View style={{ padding: Spacing.md, gap: 6 }}>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                      <Text style={{ fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold }}>{receiptSearchResult.orderNo}</Text>
+                      <View style={[styles.statusBadge, { backgroundColor: STATUS_CONFIG[receiptSearchResult.status].bg }]}>
+                        <Text style={[styles.statusText, { color: STATUS_CONFIG[receiptSearchResult.status].color }]}>{receiptSearchResult.status}</Text>
+                      </View>
+                    </View>
+                    <Text style={{ fontSize: Typography.sm, color: Colors.textPrimary }}>{receiptSearchResult.customerName}</Text>
+                    <Text style={{ fontSize: Typography.xs, color: Colors.textMuted }}>{receiptSearchResult.customerPhone}</Text>
+                    <Text style={{ fontSize: Typography.xs, color: Colors.textSecondary }} numberOfLines={2}>
+                      {receiptSearchResult.items.map(i => `${i.name} ×${i.qty}`).join(', ')}
+                    </Text>
+                    <View style={{ flexDirection: 'row', justifyContent: 'space-between', paddingTop: 6, borderTopWidth: 1, borderTopColor: Colors.divider }}>
+                      <Text style={{ fontSize: Typography.sm, color: Colors.textMuted }}>Total</Text>
+                      <Text style={{ fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold }}>{formatUGX(receiptSearchResult.total)}</Text>
+                    </View>
+                    <Text style={{ fontSize: 10, color: Colors.textMuted }}>{new Date(receiptSearchResult.createdAt).toLocaleString('en-UG')}</Text>
+                    <TouchableOpacity
+                      style={{ backgroundColor: Colors.gold, borderRadius: BorderRadius.sm, paddingVertical: 8, alignItems: 'center', marginTop: 4 }}
+                      onPress={() => { setShowReceiptSearch(false); openDetail(receiptSearchResult); }}
+                    >
+                      <Text style={{ fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.navy }}>View Full Order Details</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              ) : receiptSearchDone && receiptSearchQuery.trim().length > 0 ? (
+                <View style={{ alignItems: 'center', padding: 24, gap: 8 }}>
+                  <MaterialIcons name="search-off" size={40} color={Colors.textMuted} />
+                  <Text style={{ fontSize: Typography.sm, color: Colors.textMuted }}>No order found for "{receiptSearchQuery}"</Text>
+                </View>
+              ) : null}
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* ===== ASSIGN RIDER MODAL ===== */}
       <Modal visible={showRiderModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
-          <View style={styles.riderModal}>
+          <View style={[styles.riderModal, { maxHeight: '88%' }]}>
             <View style={styles.riderModalHeader}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
                 <MaterialIcons name="delivery-dining" size={22} color={Colors.gold} />
@@ -530,7 +655,49 @@ export default function OrdersScreen() {
                 <MaterialIcons name="close" size={20} color={Colors.textMuted} />
               </TouchableOpacity>
             </View>
-            <View style={styles.riderModalBody}>
+            <ScrollView contentContainerStyle={[styles.riderModalBody, { paddingBottom: 8 }]} showsVerticalScrollIndicator={false}>
+              {/* Rider Roster Picker from pos_riders */}
+              {ridersRoster.length > 0 && (
+                <View style={{ gap: 8 }}>
+                  <Text style={styles.riderFormLabel}>Pick from Registered Riders</Text>
+                  <View style={[styles.searchBox, { marginBottom: 4 }]}>
+                    <MaterialIcons name="search" size={14} color={Colors.textMuted} />
+                    <TextInput
+                      style={styles.searchInput}
+                      placeholder="Search riders..."
+                      placeholderTextColor={Colors.textMuted}
+                      value={riderRosterSearch}
+                      onChangeText={setRiderRosterSearch}
+                    />
+                  </View>
+                  <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
+                    {filteredRosterRiders.map(r => {
+                      const isSelected = riderName === r.name && riderPhone === r.phone;
+                      return (
+                        <TouchableOpacity
+                          key={r.id}
+                          style={[
+                            { paddingHorizontal: 12, paddingVertical: 8, borderRadius: BorderRadius.md, backgroundColor: Colors.navyCard, borderWidth: 1.5, borderColor: isSelected ? Colors.gold : Colors.border, gap: 2 },
+                            isSelected && { backgroundColor: Colors.goldMuted },
+                          ]}
+                          onPress={() => { setRiderName(r.name); setRiderPhone(r.phone); }}
+                        >
+                          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5 }}>
+                            <MaterialIcons name="delivery-dining" size={13} color={isSelected ? Colors.gold : Colors.textMuted} />
+                            <Text style={{ fontSize: Typography.sm, fontWeight: Typography.semibold, color: isSelected ? Colors.gold : Colors.textPrimary }}>{r.name}</Text>
+                          </View>
+                          <Text style={{ fontSize: 10, color: Colors.textMuted }}>{r.phone}</Text>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </ScrollView>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <View style={{ flex: 1, height: 1, backgroundColor: Colors.divider }} />
+                    <Text style={{ fontSize: 10, color: Colors.textMuted }}>or enter manually</Text>
+                    <View style={{ flex: 1, height: 1, backgroundColor: Colors.divider }} />
+                  </View>
+                </View>
+              )}
               {[
                 { label: 'Rider Name *', value: riderName, onChange: setRiderName, placeholder: 'Full name of rider', keyboard: 'default' as const },
                 { label: 'Rider Phone *', value: riderPhone, onChange: setRiderPhone, placeholder: '+256 7XX XXX XXX', keyboard: 'phone-pad' as const },
@@ -548,7 +715,7 @@ export default function OrdersScreen() {
                   />
                 </View>
               ))}
-            </View>
+            </ScrollView>
             <View style={styles.riderModalFooter}>
               <TouchableOpacity style={styles.riderCancelBtn} onPress={() => setShowRiderModal(false)}>
                 <Text style={styles.riderCancelBtnText}>Cancel</Text>
@@ -632,9 +799,10 @@ const styles = StyleSheet.create({
   pendingBadge: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: Colors.navyCard, paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.circle, borderWidth: 1, borderColor: Colors.border },
   pendingBadgeAlert: { borderColor: Colors.warning + '50', backgroundColor: Colors.warningMuted },
   pendingBadgeText: { fontSize: 12, fontWeight: Typography.bold, color: Colors.warning },
-  searchRow: { paddingHorizontal: Spacing.base, paddingTop: Spacing.md, paddingBottom: Spacing.sm },
-  searchBox: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md },
+  searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: Spacing.base, paddingTop: Spacing.md, paddingBottom: Spacing.sm },
+  searchBox: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md },
   searchInput: { flex: 1, color: Colors.textPrimary, fontSize: Typography.sm, paddingVertical: 10 },
+  receiptSearchBtn: { width: 42, height: 42, backgroundColor: Colors.skyBlueMuted, borderRadius: BorderRadius.md, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: Colors.skyBlue + '40' },
   filterWrap: { height: 48 },
   filterRow: { paddingHorizontal: Spacing.base, alignItems: 'center', gap: 8 },
   statusChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 12, paddingVertical: 7, borderRadius: BorderRadius.circle, backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border },

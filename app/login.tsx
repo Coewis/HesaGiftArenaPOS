@@ -34,6 +34,8 @@ export default function LoginScreen() {
     }
     const result = await login(email.trim(), password);
     if (result.success) {
+      // Auto-switch to staff member's assigned branch
+      if (result.branch) setBranch(result.branch);
       router.replace('/(tabs)');
     } else {
       showAlert('Login Failed', result.error || 'Invalid credentials.');
@@ -47,6 +49,7 @@ export default function LoginScreen() {
     }
     const result = await loginWithPin(pin);
     if (result.success) {
+      if (result.branch) setBranch(result.branch);
       router.replace('/(tabs)');
     } else {
       showAlert('Login Failed', result.error || 'Invalid PIN.');
@@ -68,6 +71,7 @@ export default function LoginScreen() {
   const handlePinLoginWithValue = async (value: string) => {
     const result = await loginWithPin(value);
     if (result.success) {
+      if (result.branch) setBranch(result.branch);
       router.replace('/(tabs)');
     } else {
       showAlert('Login Failed', 'Invalid PIN. Try again.');

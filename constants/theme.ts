@@ -1,44 +1,44 @@
 // HESA GIFT ARENA POS - Design System
-// Fresh Green + White palette — brand refresh 2026
+// Sky Blue + Dark Navy palette — updated 2026
 
 export const Colors = {
-  // Brand Core — Dark green backgrounds
-  navy: '#0A1F0E',
-  navyMid: '#0D2613',
-  navyLight: '#122C17',
-  navyCard: '#163520',
+  // Brand Core — Dark navy backgrounds
+  navy: '#060E1C',
+  navyMid: '#0A1628',
+  navyLight: '#0F1E38',
+  navyCard: '#122244',
 
   // White / Light
   white: '#FFFFFF',
-  offWhite: '#F4FAF5',
+  offWhite: '#F0F7FF',
 
-  // Sky Blue (accent — kept for payment badges)
+  // Primary: Sky Blue
   skyBlue: '#38B6FF',
   skyBlueDark: '#1A9FE8',
   skyBlueLight: '#6DCEFF',
   skyBlueMuted: 'rgba(56, 182, 255, 0.15)',
 
-  // Primary Green (replaces gold)
-  gold: '#22C55E',
-  goldBright: '#4ADE80',
-  goldDark: '#16A34A',
-  goldMuted: 'rgba(34, 197, 94, 0.15)',
-  goldSubtle: 'rgba(34, 197, 94, 0.07)',
+  // Gold alias → sky blue (primary accent)
+  gold: '#38B6FF',
+  goldBright: '#6DCEFF',
+  goldDark: '#1A9FE8',
+  goldMuted: 'rgba(56, 182, 255, 0.15)',
+  goldSubtle: 'rgba(56, 182, 255, 0.07)',
+  borderGold: 'rgba(56, 182, 255, 0.28)',
 
   // Text
   textPrimary: '#FFFFFF',
-  textSecondary: '#A3C4A8',
-  textMuted: '#5A8A65',
-  textGold: '#22C55E',
-  textNavy: '#0A1F0E',
+  textSecondary: '#A0B8D0',
+  textMuted: '#4A6A88',
+  textGold: '#38B6FF',
+  textNavy: '#060E1C',
 
   // UI Elements
-  surface: '#0D2613',
-  surfaceElevated: '#122C17',
-  surfaceCard: '#163520',
-  border: 'rgba(34, 197, 94, 0.15)',
-  borderGold: 'rgba(34, 197, 94, 0.28)',
-  divider: 'rgba(163, 196, 168, 0.1)',
+  surface: '#0A1628',
+  surfaceElevated: '#0F1E38',
+  surfaceCard: '#122244',
+  border: 'rgba(56, 182, 255, 0.12)',
+  divider: 'rgba(160, 184, 208, 0.08)',
 
   // Semantic
   success: '#22C55E',
@@ -58,8 +58,8 @@ export const Colors = {
   card: '#38B6FF',
 
   // Overlay
-  overlay: 'rgba(10, 31, 14, 0.88)',
-  overlayLight: 'rgba(10, 31, 14, 0.5)',
+  overlay: 'rgba(6, 14, 28, 0.88)',
+  overlayLight: 'rgba(6, 14, 28, 0.5)',
 };
 
 export const Typography = {
@@ -115,7 +115,7 @@ export const Shadows = {
   sm: {
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.25,
     shadowRadius: 4,
     elevation: 3,
   },
@@ -134,7 +134,7 @@ export const Shadows = {
     elevation: 10,
   },
   gold: {
-    shadowColor: '#22C55E',
+    shadowColor: '#38B6FF',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.3,
     shadowRadius: 12,

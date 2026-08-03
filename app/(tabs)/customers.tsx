@@ -45,20 +45,22 @@ export default function CustomersScreen() {
   const [generatingCard, setGeneratingCard] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'customers' | 'sms'>('customers');
 
-  // SMS state
   const [smsLogs, setSmsLogs] = useState<SMSLog[]>([]);
   const [smsLoading, setSmsLoading] = useState(false);
   const [showCampaignModal, setShowCampaignModal] = useState(false);
   const [campaignMessage, setCampaignMessage] = useState('');
   const [campaignTier, setCampaignTier] = useState<string>('all');
   const [sendingCampaign, setSendingCampaign] = useState(false);
+  const [savingCustomer, setSavingCustomer] = useState(false);
 
   const loadSMSLogs = useCallback(async () => {
     setSmsLoading(true);
     try {
       const logs = await fetchSMSLogs(100);
       setSmsLogs(logs);
-    } catch {}
+    } catch (e) {
+      console.log('SMS logs error:', e);
+    }
     finally { setSmsLoading(false); }
   }, []);
 
@@ -101,19 +103,25 @@ export default function CustomersScreen() {
     return list;
   }, [customers, search, filterTier]);
 
-  const handleAddCustomer = () => {
+  const handleAddCustomer = async () => {
     if (!formName || !formPhone) {
       showAlert('Missing Fields', 'Name and phone number are required.');
       return;
     }
-    addCustomer({
+    const newCust = {
       id: `cust_${Date.now()}`,
       name: formName, phone: formPhone, email: formEmail,
       loyaltyPoints: 0, totalPurchases: 0, totalSpent: 0,
-      joinDate: new Date().toISOString().slice(0, 10), tier: 'Bronze',
-    });
-    setFormName(''); setFormPhone(''); setFormEmail('');
-    setShowModal(false);
+      joinDate: new Date().toISOString().slice(0, 10), tier: 'Bronze' as const,
+    };
+    try {
+      await addCustomer(newCust);
+      setFormName(''); setFormPhone(''); setFormEmail('');
+      setShowModal(false);
+      showAlert('Registered', `${newCust.name} added successfully.`);
+    } catch {
+      showAlert('Error', 'Could not save customer. Please try again.');
+    }
   };
 
   const getCustomerSales = (customerId: string) =>

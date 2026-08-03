@@ -116,12 +116,13 @@ export function POSProvider({ children }: { children: ReactNode }) {
     setIsSyncing(true);
     try {
       await Service.seedCategories(MOCK_CATEGORIES);
-      const [cloudProducts, cloudCustomers, cloudSales, cloudOrders, cloudMovements] = await Promise.allSettled([
+      const [cloudProducts, cloudCustomers, cloudSales, cloudOrders, cloudMovements, cloudBundles] = await Promise.allSettled([
         Service.fetchProducts(),
         Service.fetchCustomers(),
         Service.fetchSales(),
         Service.fetchOrders(),
         Service.fetchInventoryMovements(),
+        Service.fetchBundles(),
       ]);
       if (cloudProducts.status === 'fulfilled' && cloudProducts.value.length > 0) setProducts(cloudProducts.value);
       if (cloudCustomers.status === 'fulfilled' && cloudCustomers.value.length > 0) setCustomers(cloudCustomers.value);
@@ -132,6 +133,7 @@ export function POSProvider({ children }: { children: ReactNode }) {
       }
       if (cloudOrders.status === 'fulfilled' && cloudOrders.value.length > 0) setOrders(cloudOrders.value);
       if (cloudMovements.status === 'fulfilled' && cloudMovements.value.length > 0) setInventoryMovements(cloudMovements.value);
+      if (cloudBundles.status === 'fulfilled' && cloudBundles.value.length > 0) setBundles(cloudBundles.value);
       setIsCloudSynced(true);
     } catch {}
     finally { setIsSyncing(false); }
@@ -191,19 +193,29 @@ export function POSProvider({ children }: { children: ReactNode }) {
     );
     if (sale.customerId) {
       const pointsEarned = Math.floor(sale.total / 1000);
-      setCustomers(prev => prev.map(c => {
-        if (c.id === sale.customerId) {
-          const netPoints = Math.max(0, c.loyaltyPoints + pointsEarned - pointsRedeemed);
-          let tier: Customer['tier'] = 'Bronze';
-          if (netPoints >= 2000) tier = 'Platinum';
-          else if (netPoints >= 1000) tier = 'Gold';
-          else if (netPoints >= 400) tier = 'Silver';
-          const updated = { ...c, loyaltyPoints: netPoints, totalSpent: c.totalSpent + sale.total, totalPurchases: c.totalPurchases + 1, tier };
-          Service.upsertCustomer(updated).catch(() => {});
-          return updated;
-        }
-        return c;
-      }));
+      setCustomers(prev => {
+        const updated = prev.map(c => {
+          if (c.id === sale.customerId) {
+            const oldTier = c.tier;
+            const netPoints = Math.max(0, c.loyaltyPoints + pointsEarned - pointsRedeemed);
+            let tier: Customer['tier'] = 'Bronze';
+            if (netPoints >= 2000) tier = 'Platinum';
+            else if (netPoints >= 1000) tier = 'Gold';
+            else if (netPoints >= 400) tier = 'Silver';
+            const newCustomer = { ...c, loyaltyPoints: netPoints, totalSpent: c.totalSpent + sale.total, totalPurchases: c.totalPurchases + 1, tier };
+            Service.upsertCustomer(newCustomer).catch(() => {});
+            // Trigger tier upgrade SMS if tier changed
+            if (tier !== oldTier && c.phone) {
+              import('@/services/smsService').then(({ sendTierUpgradeSMS }) => {
+                sendTierUpgradeSMS({ phone: c.phone, customerName: c.name, customerId: c.id, newTier: tier, loyaltyPoints: netPoints }).catch(() => {});
+              }).catch(() => {});
+            }
+            return newCustomer;
+          }
+          return c;
+        });
+        return updated;
+      });
     }
     try { await Service.insertSale(sale); } catch {}
   }, []);
@@ -362,14 +374,18 @@ export function POSProvider({ children }: { children: ReactNode }) {
   // ─── Bundle Methods ───────────────────────────────────────────────────────
   const addBundle = useCallback((bundle: ProductBundle) => {
     setBundles(prev => [bundle, ...prev]);
+    // Persist to database
+    Service.upsertBundle(bundle).catch(() => {});
   }, []);
 
   const updateBundle = useCallback((bundle: ProductBundle) => {
     setBundles(prev => prev.map(b => b.id === bundle.id ? bundle : b));
+    Service.upsertBundle(bundle).catch(() => {});
   }, []);
 
   const deleteBundle = useCallback((id: string) => {
     setBundles(prev => prev.map(b => b.id === id ? { ...b, status: 'inactive' as const } : b));
+    Service.archiveBundle(id).catch(() => {});
   }, []);
 
   // Returns array of {product, qty} pairs to add to cart when a bundle is sold

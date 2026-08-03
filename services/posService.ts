@@ -237,6 +237,35 @@ export const uploadProductImage = async (productId: string, base64: string, mime
   return data.publicUrl;
 };
 
+// ─── BUNDLES ─────────────────────────────────────────────────────────────────
+export const fetchBundles = async () => {
+  const { data, error } = await db().from('pos_bundles').select('*').order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data || []).map((r: any) => ({
+    id: r.id, name: r.name, description: r.description || '',
+    imageUrl: r.image_url || '', bundlePrice: Number(r.bundle_price),
+    originalPrice: Number(r.original_price), discountPct: Number(r.discount_pct),
+    components: Array.isArray(r.components) ? r.components : JSON.parse(r.components || '[]'),
+    status: r.status,
+  }));
+};
+
+export const upsertBundle = async (bundle: any): Promise<void> => {
+  const { error } = await db().from('pos_bundles').upsert({
+    id: bundle.id, name: bundle.name, description: bundle.description || '',
+    image_url: bundle.imageUrl || '', bundle_price: bundle.bundlePrice,
+    original_price: bundle.originalPrice, discount_pct: bundle.discountPct,
+    components: bundle.components, status: bundle.status,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) throw error;
+};
+
+export const archiveBundle = async (id: string): Promise<void> => {
+  const { error } = await db().from('pos_bundles').update({ status: 'inactive', updated_at: new Date().toISOString() }).eq('id', id);
+  if (error) throw error;
+};
+
 // ─── DATA MAPPERS ────────────────────────────────────────────────────────────
 function mapProduct(r: any): Product {
   return {

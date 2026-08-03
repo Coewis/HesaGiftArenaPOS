@@ -221,13 +221,6 @@ export default function LoginScreen() {
           </View>
         )}
 
-        {/* Demo Credentials */}
-        <View style={styles.demoBox}>
-          <Text style={styles.demoTitle}>DEMO CREDENTIALS</Text>
-          <Text style={styles.demoText}>Admin: admin@hesagift.ug / admin123 (PIN: 1234)</Text>
-          <Text style={styles.demoText}>Cashier: cashier@hesagift.ug / cashier123 (PIN: 3456)</Text>
-        </View>
-
         {/* Rider Portal Link */}
         <TouchableOpacity style={styles.riderPortalBtn} onPress={() => router.push('/rider-login')}>
           <View style={styles.riderPortalLeft}>
@@ -392,14 +385,6 @@ const styles = StyleSheet.create({
   pinKeyEmpty: { backgroundColor: 'transparent', borderColor: 'transparent' },
   pinKeyDel: { backgroundColor: Colors.navyLight },
   pinKeyText: { fontSize: 22, fontWeight: Typography.semibold, color: Colors.textPrimary },
-  demoBox: {
-    width: '100%', marginTop: Spacing.xl,
-    backgroundColor: Colors.goldSubtle, borderRadius: BorderRadius.md,
-    borderWidth: 1, borderColor: Colors.borderGold,
-    padding: Spacing.md, gap: 4,
-  },
-  demoTitle: { fontSize: Typography.xs, fontWeight: Typography.bold, color: Colors.gold, letterSpacing: 1 },
-  demoText: { fontSize: Typography.xs, color: Colors.textSecondary },
   riderPortalBtn: {
     width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     backgroundColor: Colors.navyLight, borderRadius: BorderRadius.lg,

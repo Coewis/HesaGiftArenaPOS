@@ -1,13 +1,18 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useCallback } from 'react';
 import {
   View, Text, TouchableOpacity, FlatList,
   StyleSheet, Modal, ScrollView, TextInput, Linking,
+  Platform, ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
+import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
+import { CameraView, useCameraPermissions } from 'expo-camera';
 import { usePOS } from '@/hooks/usePOS';
 import { useAuth } from '@/hooks/useAuth';
+import { useBranch } from '@/hooks/useBranch';
 import { useAlert } from '@/template';
 import { Colors, Typography, Spacing, BorderRadius, Shadows } from '@/constants/theme';
 import { Product, InventoryMovement, RestockRequest, SupplierContact } from '@/types';
@@ -43,9 +48,11 @@ export default function InventoryScreen() {
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
   const { showAlert } = useAlert();
+  const { currentBranch } = useBranch();
   const {
     products, inventoryMovements, restockRequests, damagedLogs, suppliers,
     logDamagedGoods, restockProduct, addRestockRequest, updateRestockRequest,
+    getProductByBarcode,
   } = usePOS();
 
   const [activeTab, setActiveTab] = useState<TabKey>('stock');
@@ -76,6 +83,18 @@ export default function InventoryScreen() {
   // Supplier detail modal
   const [selectedSupplier, setSelectedSupplier] = useState<SupplierContact | null>(null);
 
+  // Barcode scanner state
+  const [showScanner, setShowScanner] = useState(false);
+  const [scanTarget, setScanTarget] = useState<'restock' | 'damaged'>('restock');
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const scanCooldown = useRef(false);
+
+  // Movements filter/export state
+  const [movementDateFrom, setMovementDateFrom] = useState('');
+  const [movementDateTo, setMovementDateTo] = useState('');
+  const [movementTypeFilter, setMovementTypeFilter] = useState<string>('all');
+  const [exportingCSV, setExportingCSV] = useState(false);
+
   const activeProducts = useMemo(() => products.filter(p => p.status === 'active'), [products]);
 
   const filteredStock = useMemo(() => {
@@ -89,6 +108,14 @@ export default function InventoryScreen() {
     }
     return list;
   }, [activeProducts, stockFilter, stockSearch]);
+
+  const filteredMovements = useMemo(() => {
+    let list = [...inventoryMovements];
+    if (movementTypeFilter !== 'all') list = list.filter(m => m.type === movementTypeFilter);
+    if (movementDateFrom) list = list.filter(m => m.timestamp >= movementDateFrom);
+    if (movementDateTo) list = list.filter(m => m.timestamp <= movementDateTo + 'T23:59:59');
+    return list;
+  }, [inventoryMovements, movementTypeFilter, movementDateFrom, movementDateTo]);
 
   const totalStockValue = useMemo(() =>
     activeProducts.reduce((sum, p) => sum + p.stock * p.buyingPrice, 0), [activeProducts]);
@@ -180,6 +207,82 @@ export default function InventoryScreen() {
     showAlert('Request Submitted', `Restock request for ${reqProduct.name} submitted.`);
   };
 
+  // ─── Barcode Scanner ────────────────────────────────────────────────────────
+  const openBarcodeScanner = async (target: 'restock' | 'damaged') => {
+    if (!cameraPermission?.granted) {
+      const result = await requestCameraPermission();
+      if (!result.granted) {
+        showAlert('Camera Permission', 'Camera access is required to scan barcodes.');
+        return;
+      }
+    }
+    setScanTarget(target);
+    setShowScanner(true);
+  };
+
+  const handleBarcodeScan = useCallback((barcode: string) => {
+    if (scanCooldown.current) return;
+    scanCooldown.current = true;
+    setTimeout(() => { scanCooldown.current = false; }, 2000);
+
+    const product = getProductByBarcode(barcode);
+    setShowScanner(false);
+
+    if (product) {
+      if (scanTarget === 'restock') {
+        setSelectedProduct(product);
+        setRestockQty('');
+        setRestockNote('');
+        setShowRestockModal(true);
+      } else {
+        setDamagedProduct(product);
+        setDamagedQty('');
+        setDamagedReason('');
+        setShowDamagedModal(true);
+      }
+    } else {
+      showAlert('Not Found', `No product found for barcode: ${barcode}`);
+    }
+  }, [getProductByBarcode, scanTarget]);
+
+  // ─── Export Movements CSV ───────────────────────────────────────────────────
+  const handleExportMovementsCSV = async () => {
+    if (filteredMovements.length === 0) {
+      showAlert('No Data', 'No inventory movements to export.');
+      return;
+    }
+    setExportingCSV(true);
+    try {
+      const headers = ['Date', 'Product', 'Type', 'Qty Change', 'Previous Stock', 'New Stock', 'Note', 'Recorded By', 'Branch'];
+      const rows = filteredMovements.map(m => [
+        new Date(m.timestamp).toLocaleString('en-UG'),
+        m.productName,
+        m.type,
+        m.qty > 0 ? `+${m.qty}` : String(m.qty),
+        String(m.previousStock),
+        String(m.newStock),
+        m.note || '',
+        m.recordedBy,
+        currentBranch.name,
+      ].map(v => `"${String(v).replace(/"/g, '""')}"`).join(','));
+
+      const csv = [headers.join(','), ...rows].join('\n');
+      const fileName = `inventory-movements-${new Date().toISOString().slice(0, 10)}.csv`;
+      const path = `${FileSystem.documentDirectory}${fileName}`;
+      await FileSystem.writeAsStringAsync(path, csv, { encoding: FileSystem.EncodingType.UTF8 });
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(path, { mimeType: 'text/csv', dialogTitle: 'Export Inventory Movements' });
+      } else {
+        showAlert('Exported', `Saved as ${fileName}`);
+      }
+    } catch {
+      showAlert('Error', 'Could not export movements.');
+    } finally {
+      setExportingCSV(false);
+    }
+  };
+
   const TABS: { key: TabKey; label: string; icon: string }[] = [
     { key: 'stock', label: 'Stock Levels', icon: 'inventory' },
     { key: 'movements', label: 'History', icon: 'history' },
@@ -197,6 +300,10 @@ export default function InventoryScreen() {
           <Text style={styles.headerSub}>Stock value: {formatUGX(totalStockValue)}</Text>
         </View>
         <View style={styles.headerBtns}>
+          <TouchableOpacity style={styles.scanHeaderBtn} onPress={() => openBarcodeScanner('restock')}>
+            <MaterialIcons name="qr-code-scanner" size={16} color={Colors.skyBlue} />
+            <Text style={styles.scanHeaderBtnText}>Scan</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={styles.damagedBtn} onPress={() => handleLogDamaged()}>
             <MaterialIcons name="broken-image" size={14} color={Colors.danger} />
             <Text style={styles.damagedBtnText}>Log Damage</Text>
@@ -264,6 +371,9 @@ export default function InventoryScreen() {
                 onChangeText={setStockSearch}
               />
             </View>
+            <TouchableOpacity style={styles.scanInlineBtn} onPress={() => openBarcodeScanner('restock')}>
+              <MaterialIcons name="qr-code-scanner" size={18} color={Colors.skyBlue} />
+            </TouchableOpacity>
           </View>
           <View style={styles.filterRow}>
             {(['all', 'ok', 'low', 'out'] as const).map(f => (
@@ -341,43 +451,83 @@ export default function InventoryScreen() {
 
       {/* === MOVEMENT HISTORY TAB === */}
       {activeTab === 'movements' && (
-        <FlatList
-          data={inventoryMovements}
-          keyExtractor={i => i.id}
-          contentContainerStyle={[styles.list, { paddingTop: Spacing.md }]}
-          showsVerticalScrollIndicator={false}
-          ListEmptyComponent={
-            <View style={styles.empty}>
-              <MaterialIcons name="history" size={40} color={Colors.textMuted} />
-              <Text style={styles.emptyText}>No movement history</Text>
-            </View>
-          }
-          renderItem={({ item }) => {
-            const color = MOVEMENT_COLORS[item.type] || Colors.textMuted;
-            const icon = MOVEMENT_ICONS[item.type] || 'swap-horiz';
-            return (
-              <View style={styles.movementCard}>
-                <View style={[styles.movementIcon, { backgroundColor: color + '20' }]}>
-                  <MaterialIcons name={icon as any} size={18} color={color} />
-                </View>
-                <View style={styles.movementInfo}>
-                  <Text style={styles.movementProduct} numberOfLines={1}>{item.productName}</Text>
-                  <Text style={styles.movementNote} numberOfLines={1}>{item.note}</Text>
-                  <Text style={styles.movementBy}>By {item.recordedBy} · {new Date(item.timestamp).toLocaleDateString('en-UG')}</Text>
-                </View>
-                <View style={styles.movementRight}>
-                  <Text style={[styles.movementQty, { color }]}>
-                    {item.qty > 0 ? '+' : ''}{item.qty}
+        <View style={styles.tabContent}>
+          {/* Filter + Export bar */}
+          <View style={styles.movementsToolbar}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 6, alignItems: 'center' }}>
+              {(['all', 'sale', 'restock', 'damaged', 'adjustment', 'return'] as const).map(t => (
+                <TouchableOpacity
+                  key={t}
+                  style={[styles.filterChip, movementTypeFilter === t && styles.filterChipActive]}
+                  onPress={() => setMovementTypeFilter(t)}
+                >
+                  <Text style={[styles.filterChipText, movementTypeFilter === t && styles.filterChipTextActive]}>
+                    {t === 'all' ? 'All' : t.charAt(0).toUpperCase() + t.slice(1)}
                   </Text>
-                  <Text style={styles.movementStock}>{item.previousStock} → {item.newStock}</Text>
-                  <View style={[styles.movementTypeBadge, { backgroundColor: color + '15' }]}>
-                    <Text style={[styles.movementTypeText, { color }]}>{item.type}</Text>
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+            <TouchableOpacity style={styles.exportBtn} onPress={handleExportMovementsCSV} disabled={exportingCSV}>
+              {exportingCSV ? <ActivityIndicator size="small" color={Colors.navy} /> : <MaterialIcons name="download" size={14} color={Colors.navy} />}
+              <Text style={styles.exportBtnText}>CSV</Text>
+            </TouchableOpacity>
+          </View>
+          {/* Date range */}
+          <View style={styles.movementsDateRow}>
+            <TextInput
+              style={styles.dateInput}
+              value={movementDateFrom}
+              onChangeText={setMovementDateFrom}
+              placeholder="From (YYYY-MM-DD)"
+              placeholderTextColor={Colors.textMuted}
+            />
+            <TextInput
+              style={styles.dateInput}
+              value={movementDateTo}
+              onChangeText={setMovementDateTo}
+              placeholder="To (YYYY-MM-DD)"
+              placeholderTextColor={Colors.textMuted}
+            />
+          </View>
+          <Text style={styles.movementsCount}>{filteredMovements.length} records</Text>
+          <FlatList
+            data={filteredMovements}
+            keyExtractor={i => i.id}
+            contentContainerStyle={styles.list}
+            showsVerticalScrollIndicator={false}
+            ListEmptyComponent={
+              <View style={styles.empty}>
+                <MaterialIcons name="history" size={40} color={Colors.textMuted} />
+                <Text style={styles.emptyText}>No movement history</Text>
+              </View>
+            }
+            renderItem={({ item }) => {
+              const color = MOVEMENT_COLORS[item.type] || Colors.textMuted;
+              const icon = MOVEMENT_ICONS[item.type] || 'swap-horiz';
+              return (
+                <View style={styles.movementCard}>
+                  <View style={[styles.movementIcon, { backgroundColor: color + '20' }]}>
+                    <MaterialIcons name={icon as any} size={18} color={color} />
+                  </View>
+                  <View style={styles.movementInfo}>
+                    <Text style={styles.movementProduct} numberOfLines={1}>{item.productName}</Text>
+                    <Text style={styles.movementNote} numberOfLines={1}>{item.note}</Text>
+                    <Text style={styles.movementBy}>By {item.recordedBy} · {new Date(item.timestamp).toLocaleDateString('en-UG')}</Text>
+                  </View>
+                  <View style={styles.movementRight}>
+                    <Text style={[styles.movementQty, { color }]}>
+                      {item.qty > 0 ? '+' : ''}{item.qty}
+                    </Text>
+                    <Text style={styles.movementStock}>{item.previousStock} → {item.newStock}</Text>
+                    <View style={[styles.movementTypeBadge, { backgroundColor: color + '15' }]}>
+                      <Text style={[styles.movementTypeText, { color }]}>{item.type}</Text>
+                    </View>
                   </View>
                 </View>
-              </View>
-            );
-          }}
-        />
+              );
+            }}
+          />
+        </View>
       )}
 
       {/* === RESTOCK REQUESTS TAB === */}
@@ -463,10 +613,16 @@ export default function InventoryScreen() {
                 Total estimated loss: {formatUGX(damagedLogs.reduce((s, d) => s + d.estimatedLoss, 0))}
               </Text>
             </View>
-            <TouchableOpacity style={styles.logDmgBtn} onPress={() => handleLogDamaged()}>
-              <MaterialIcons name="add" size={14} color={Colors.navy} />
-              <Text style={styles.logDmgBtnText}>Log</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              <TouchableOpacity style={styles.scanDamagedBtn} onPress={() => openBarcodeScanner('damaged')}>
+                <MaterialIcons name="qr-code-scanner" size={13} color={Colors.skyBlue} />
+                <Text style={styles.scanDamagedBtnText}>Scan</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={styles.logDmgBtn} onPress={() => handleLogDamaged()}>
+                <MaterialIcons name="add" size={14} color={Colors.navy} />
+                <Text style={styles.logDmgBtnText}>Log</Text>
+              </TouchableOpacity>
+            </View>
           </View>
           <FlatList
             data={damagedLogs}
@@ -539,19 +695,58 @@ export default function InventoryScreen() {
         />
       )}
 
+      {/* ===== BARCODE SCANNER MODAL ===== */}
+      <Modal visible={showScanner} animationType="slide">
+        <View style={styles.scannerContainer}>
+          <View style={[styles.scannerHeader, { paddingTop: insets.top + 10 }]}>
+            <TouchableOpacity onPress={() => setShowScanner(false)} style={styles.scannerCloseBtn}>
+              <MaterialIcons name="close" size={24} color={Colors.textPrimary} />
+            </TouchableOpacity>
+            <Text style={styles.scannerTitle}>
+              Scan Product Barcode — {scanTarget === 'restock' ? 'Restock' : 'Log Damage'}
+            </Text>
+            <View style={{ width: 40 }} />
+          </View>
+          <CameraView
+            style={styles.camera}
+            facing="back"
+            onBarcodeScanned={({ data }) => handleBarcodeScan(data)}
+            barcodeScannerSettings={{ barcodeTypes: ['code128', 'code39', 'ean13', 'ean8', 'qr', 'upc_a', 'upc_e'] }}
+          >
+            <View style={styles.scannerOverlay}>
+              <View style={styles.scannerViewfinder}>
+                <View style={[styles.scannerCorner, styles.scannerCornerTL]} />
+                <View style={[styles.scannerCorner, styles.scannerCornerTR]} />
+                <View style={[styles.scannerCorner, styles.scannerCornerBL]} />
+                <View style={[styles.scannerCorner, styles.scannerCornerBR]} />
+              </View>
+              <Text style={styles.scannerHint}>Point at product barcode to auto-select</Text>
+            </View>
+          </CameraView>
+        </View>
+      </Modal>
+
       {/* ===== QUICK RESTOCK MODAL ===== */}
       <Modal visible={showRestockModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
           <View style={styles.modal}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Quick Restock</Text>
-              <TouchableOpacity onPress={() => setShowRestockModal(false)}>
-                <MaterialIcons name="close" size={20} color={Colors.textMuted} />
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="add-circle" size={20} color={Colors.success} />
+                <Text style={styles.modalTitle}>Quick Restock</Text>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity style={styles.scanModalBtn} onPress={() => { setShowRestockModal(false); openBarcodeScanner('restock'); }}>
+                  <MaterialIcons name="qr-code-scanner" size={16} color={Colors.skyBlue} />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowRestockModal(false)}>
+                  <MaterialIcons name="close" size={20} color={Colors.textMuted} />
+                </TouchableOpacity>
+              </View>
             </View>
             <View style={styles.modalBody}>
               <Text style={styles.restockProductName}>{selectedProduct?.name}</Text>
-              <Text style={styles.restockCurrentStock}>Current stock: {selectedProduct?.stock} units</Text>
+              <Text style={styles.restockCurrentStock}>Current stock: {selectedProduct?.stock} units · Min: {selectedProduct?.minStock}</Text>
               <View style={styles.formGroup}>
                 <Text style={styles.formLabel}>Quantity to Add *</Text>
                 <TextInput
@@ -574,6 +769,18 @@ export default function InventoryScreen() {
                   onChangeText={setRestockNote}
                 />
               </View>
+              {/* Quick preset buttons */}
+              <View style={{ flexDirection: 'row', gap: 8, flexWrap: 'wrap' }}>
+                {['5', '10', '20', '50', '100'].map(v => (
+                  <TouchableOpacity
+                    key={v}
+                    style={[styles.qtyPreset, restockQty === v && styles.qtyPresetActive]}
+                    onPress={() => setRestockQty(v)}
+                  >
+                    <Text style={[styles.qtyPresetText, restockQty === v && { color: Colors.navy }]}>+{v}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
             <View style={styles.modalFooter}>
               <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowRestockModal(false)}>
@@ -593,10 +800,18 @@ export default function InventoryScreen() {
         <View style={styles.modalOverlay}>
           <View style={styles.modal}>
             <View style={styles.modalHeader}>
-              <Text style={[styles.modalTitle, { color: Colors.danger }]}>Log Damaged Goods</Text>
-              <TouchableOpacity onPress={() => setShowDamagedModal(false)}>
-                <MaterialIcons name="close" size={20} color={Colors.textMuted} />
-              </TouchableOpacity>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="broken-image" size={20} color={Colors.danger} />
+                <Text style={[styles.modalTitle, { color: Colors.danger }]}>Log Damaged Goods</Text>
+              </View>
+              <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+                <TouchableOpacity style={styles.scanModalBtn} onPress={() => { setShowDamagedModal(false); openBarcodeScanner('damaged'); }}>
+                  <MaterialIcons name="qr-code-scanner" size={16} color={Colors.skyBlue} />
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setShowDamagedModal(false)}>
+                  <MaterialIcons name="close" size={20} color={Colors.textMuted} />
+                </TouchableOpacity>
+              </View>
             </View>
             <ScrollView contentContainerStyle={styles.modalBody} showsVerticalScrollIndicator={false}>
               {!damagedProduct && (
@@ -808,6 +1023,12 @@ const styles = StyleSheet.create({
   headerTitle: { fontSize: Typography.xl, fontWeight: Typography.bold, color: Colors.textPrimary },
   headerSub: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 2 },
   headerBtns: { flexDirection: 'row', gap: 8 },
+  scanHeaderBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+    backgroundColor: Colors.skyBlueMuted, paddingHorizontal: Spacing.md, paddingVertical: 8,
+    borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.skyBlue + '40',
+  },
+  scanHeaderBtnText: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.skyBlue },
   damagedBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 5,
     backgroundColor: Colors.dangerMuted, paddingHorizontal: Spacing.md, paddingVertical: 8,
@@ -831,13 +1052,18 @@ const styles = StyleSheet.create({
   tabText: { fontSize: 12, color: Colors.textMuted, fontWeight: Typography.medium },
   tabTextActive: { color: Colors.navy, fontWeight: Typography.bold },
   tabContent: { flex: 1 },
-  searchRow: { paddingHorizontal: Spacing.base, paddingTop: Spacing.md },
+  searchRow: { flexDirection: 'row', gap: 8, paddingHorizontal: Spacing.base, paddingTop: Spacing.md },
   searchBox: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
+    flex: 1, flexDirection: 'row', alignItems: 'center', gap: 8,
     backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md,
     borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md,
   },
   searchInput: { flex: 1, color: Colors.textPrimary, fontSize: Typography.sm, paddingVertical: 10 },
+  scanInlineBtn: {
+    width: 42, height: 42, borderRadius: BorderRadius.md,
+    backgroundColor: Colors.skyBlueMuted, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.skyBlue + '40',
+  },
   filterRow: { flexDirection: 'row', gap: 8, paddingHorizontal: Spacing.base, paddingVertical: Spacing.sm },
   filterChip: {
     paddingHorizontal: 12, paddingVertical: 6, borderRadius: BorderRadius.circle,
@@ -876,6 +1102,29 @@ const styles = StyleSheet.create({
     width: 32, height: 32, borderRadius: BorderRadius.sm,
     alignItems: 'center', justifyContent: 'center', borderWidth: 1,
   },
+  // Movement Toolbar
+  movementsToolbar: {
+    flexDirection: 'row', alignItems: 'center', paddingHorizontal: Spacing.base,
+    paddingVertical: Spacing.sm, gap: 8,
+  },
+  movementsDateRow: {
+    flexDirection: 'row', gap: 8, paddingHorizontal: Spacing.base, paddingBottom: Spacing.sm,
+  },
+  dateInput: {
+    flex: 1, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.sm,
+    borderWidth: 1, borderColor: Colors.border, color: Colors.textPrimary,
+    fontSize: 11, paddingHorizontal: 8, paddingVertical: 8,
+  },
+  movementsCount: {
+    fontSize: Typography.xs, color: Colors.textMuted,
+    paddingHorizontal: Spacing.base, marginBottom: 4,
+  },
+  exportBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: Colors.gold, paddingHorizontal: 10, paddingVertical: 7,
+    borderRadius: BorderRadius.sm, ...Shadows.gold, flexShrink: 0,
+  },
+  exportBtnText: { fontSize: 11, fontWeight: Typography.bold, color: Colors.navy },
   // Movement Card
   movementCard: {
     flexDirection: 'row', alignItems: 'center', gap: 12,
@@ -918,6 +1167,12 @@ const styles = StyleSheet.create({
   // Damaged
   damagedSummary: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   damagedSummaryText: { fontSize: Typography.sm, color: Colors.danger, fontWeight: Typography.medium },
+  scanDamagedBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: Colors.skyBlueMuted, paddingHorizontal: 8, paddingVertical: 6,
+    borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.skyBlue + '30',
+  },
+  scanDamagedBtnText: { fontSize: 11, fontWeight: Typography.bold, color: Colors.skyBlue },
   logDmgBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 4,
     backgroundColor: Colors.danger, paddingHorizontal: 10, paddingVertical: 6,
@@ -1047,4 +1302,32 @@ const styles = StyleSheet.create({
     borderRadius: BorderRadius.sm, borderWidth: 1, borderColor: Colors.warning + '30',
   },
   lossPreviewText: { fontSize: Typography.sm, color: Colors.warning },
+  scanModalBtn: {
+    width: 36, height: 36, borderRadius: BorderRadius.sm,
+    backgroundColor: Colors.skyBlueMuted, alignItems: 'center', justifyContent: 'center',
+    borderWidth: 1, borderColor: Colors.skyBlue + '40',
+  },
+  qtyPreset: {
+    paddingHorizontal: 14, paddingVertical: 7, borderRadius: BorderRadius.md,
+    backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border,
+  },
+  qtyPresetActive: { backgroundColor: Colors.gold, borderColor: Colors.gold },
+  qtyPresetText: { fontSize: 12, color: Colors.textMuted, fontWeight: Typography.medium },
+  // Scanner
+  scannerContainer: { flex: 1, backgroundColor: '#000' },
+  scannerHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: Spacing.base, paddingBottom: 12, backgroundColor: 'rgba(0,0,0,0.8)',
+  },
+  scannerCloseBtn: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
+  scannerTitle: { flex: 1, fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.textPrimary, textAlign: 'center' },
+  camera: { flex: 1 },
+  scannerOverlay: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 20 },
+  scannerViewfinder: { width: 260, height: 180, position: 'relative' },
+  scannerCorner: { position: 'absolute', width: 30, height: 30, borderColor: Colors.gold, borderWidth: 3 },
+  scannerCornerTL: { top: 0, left: 0, borderRightWidth: 0, borderBottomWidth: 0 },
+  scannerCornerTR: { top: 0, right: 0, borderLeftWidth: 0, borderBottomWidth: 0 },
+  scannerCornerBL: { bottom: 0, left: 0, borderRightWidth: 0, borderTopWidth: 0 },
+  scannerCornerBR: { bottom: 0, right: 0, borderLeftWidth: 0, borderTopWidth: 0 },
+  scannerHint: { fontSize: Typography.sm, color: Colors.textMuted, textAlign: 'center' },
 });

@@ -386,9 +386,17 @@ export default function ProductsScreen() {
 
   const getCategoryName = (catId: string) => MOCK_CATEGORIES.find(c => c.id === catId)?.name || catId;
 
-  // ─── Enhanced Sticker with QR Code ───────────────────────────────────────
+  // ─── Enhanced Sticker with category-based unique barcode ───────────────────
   const buildStickerHTML = (product: Product) => {
-    const qrData = encodeURIComponent(product.barcode);
+    // Generate unique barcode based on SKU category prefix
+    const catPrefixes: Record<string, string> = {
+      cat_bouquets: 'BQT', cat_gifts: 'GFT', cat_balloons: 'BLN',
+      cat_hampers: 'HMP', cat_cards: 'CRD', cat_chocolates: 'CHC',
+      cat_teddies: 'TDY', cat_custom: 'CST',
+    };
+    const catPrefix = catPrefixes[product.category] || 'HGA';
+    const uniqueBarcode = product.barcode || `${catPrefix}${product.id.slice(-6).toUpperCase()}`;
+    const qrData = encodeURIComponent(uniqueBarcode);
     const qrUrl = `https://api.qrserver.com/v1/create-qr-code/?size=90x90&format=svg&data=${qrData}&bgcolor=ffffff&color=0A1628&margin=2`;
     const isDiscounted = (product.discount || 0) > 0;
     const discountedPrice = isDiscounted
@@ -399,31 +407,32 @@ export default function ProductsScreen() {
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 body{font-family:Arial,sans-serif;padding:10px;background:#f5f5f5;display:flex;align-items:center;justify-content:center;min-height:100vh;}
-.sticker{width:280px;background:#fff;border:2px solid #D4AF37;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.12);}
-.sticker-header{background:linear-gradient(135deg,#0A1628 0%,#1A3055 100%);padding:10px 12px;display:flex;justify-content:space-between;align-items:center;}
-.brand{font-size:11px;font-weight:900;color:#D4AF37;letter-spacing:1.5px;}
+.sticker{width:280px;background:#fff;border:2px solid #38B6FF;border-radius:10px;overflow:hidden;box-shadow:0 4px 12px rgba(0,0,0,0.12);}
+.sticker-header{background:linear-gradient(135deg,#060E1C 0%,#0A1628 100%);padding:10px 12px;display:flex;justify-content:space-between;align-items:center;}
+.brand{font-size:11px;font-weight:900;color:#38B6FF;letter-spacing:1.5px;}
 .sticker-type{font-size:8px;color:rgba(255,255,255,0.5);letter-spacing:0.5px;}
 .sticker-body{padding:12px;}
-.product-name{font-size:15px;font-weight:bold;color:#0A1628;margin-bottom:3px;line-height:1.3;}
+.product-name{font-size:15px;font-weight:bold;color:#060E1C;margin-bottom:3px;line-height:1.3;}
 .category{font-size:10px;color:#888;margin-bottom:8px;}
 .price-row{display:flex;align-items:center;gap:8px;margin-bottom:10px;}
-.price{font-size:20px;font-weight:900;color:#B8922E;}
+.price{font-size:20px;font-weight:900;color:#1A9FE8;}
 ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line-through;}.discount-badge{background:#27ae60;color:#fff;font-size:9px;font-weight:bold;padding:2px 6px;border-radius:10px;}` : ''}
 .divider{border:none;border-top:1px dashed #ddd;margin:8px 0;}
 .bottom-row{display:flex;align-items:flex-start;gap:10px;}
 .qr-wrap{display:flex;flex-direction:column;align-items:center;gap:3px;flex-shrink:0;}
-.qr-img{width:80px;height:80px;border:1.5px solid #D4AF37;border-radius:4px;padding:2px;}
+.qr-img{width:80px;height:80px;border:1.5px solid #38B6FF;border-radius:4px;padding:2px;}
 .qr-label{font-size:7px;color:#aaa;letter-spacing:0.3px;}
 .barcode-block{flex:1;}
 .sku-label{font-size:8px;color:#aaa;text-transform:uppercase;letter-spacing:0.5px;margin-bottom:2px;}
 .sku-val{font-size:12px;font-family:'Courier New',monospace;color:#333;font-weight:bold;word-break:break-all;}
-.barcode-lines{font-family:'Courier New',monospace;font-size:32px;letter-spacing:2px;color:#0A1628;line-height:1;margin:4px 0;}
+.barcode-lines{font-family:'Courier New',monospace;font-size:32px;letter-spacing:2px;color:#060E1C;line-height:1;margin:4px 0;}
 .meta{font-size:9px;color:#bbb;margin-top:6px;}
+.cat-code{font-size:8px;color:#38B6FF;font-weight:bold;margin-top:3px;}
 </style></head><body>
 <div class="sticker">
   <div class="sticker-header">
     <div><div class="brand">HESA GIFT ARENA</div><div class="sticker-type">Product Label</div></div>
-    <div style="width:6px;height:6px;border-radius:3px;background:#D4AF37;"></div>
+    <div style="width:6px;height:6px;border-radius:3px;background:#38B6FF;"></div>
   </div>
   <div class="sticker-body">
     <div class="product-name">${product.name}</div>
@@ -440,9 +449,10 @@ ${isDiscounted ? `.original-price{font-size:12px;color:#aaa;text-decoration:line
       </div>
       <div class="barcode-block">
         <div class="sku-label">Barcode / SKU</div>
-        <div class="sku-val">${product.barcode}</div>
-        <div class="barcode-lines">|||${product.barcode}|||</div>
+        <div class="sku-val">${uniqueBarcode}</div>
+        <div class="barcode-lines">|||${uniqueBarcode.slice(0,8)}|||</div>
         <div class="meta">Stock: ${product.stock} units · Min: ${product.minStock}</div>
+        <div class="cat-code">${catPrefix} · ${getCategoryName(product.category)}</div>
       </div>
     </div>
   </div>

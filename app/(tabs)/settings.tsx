@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet,
-  TextInput, Modal, ActivityIndicator, Dimensions,
+  TextInput, Modal, ActivityIndicator, Dimensions, Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { MaterialIcons } from '@expo/vector-icons';
@@ -17,8 +17,10 @@ import { Colors, Typography, Spacing, BorderRadius, Shadows } from '@/constants/
 import { MOCK_USERS } from '@/constants/mockData';
 import { UserRole } from '@/types';
 import { fetchAuditLogs, fetchAuditStaffList, AuditLog } from '@/services/auditService';
+import { useRouter } from 'expo-router';
 
-const { width } = Dimensions.get('window');
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const isDesktop = Platform.OS === 'web' && SCREEN_WIDTH >= 900;
 const formatUGX = (n: number) => `UGX ${n.toLocaleString()}`;
 
 const DEFAULT_SETTINGS = {
@@ -60,7 +62,8 @@ const ACTION_LABELS: Record<string, { label: string; color: string; icon: string
 
 export default function SettingsScreen() {
   const insets = useSafeAreaInsets();
-  const { user } = useAuth();
+  const router = useRouter();
+  const { user, logout } = useAuth();
   const { currentBranch, branches } = useBranch();
   const { products, customers, sales, orders, inventoryMovements, isCloudSynced, isSyncing } = usePOS();
   const { shifts } = useShift();
@@ -807,7 +810,7 @@ export default function SettingsScreen() {
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       <View style={styles.header}>
-        <View>
+        <View style={{ flex: 1 }}>
           <Text style={styles.headerTitle}>Settings</Text>
           <Text style={styles.headerSub}>System configuration · {user?.role}</Text>
         </View>
@@ -816,21 +819,48 @@ export default function SettingsScreen() {
             <View style={[styles.syncIndicatorDot, { backgroundColor: isCloudSynced ? Colors.success : Colors.warning }]} />
             <Text style={[styles.syncIndicatorText, { color: isCloudSynced ? Colors.success : Colors.warning }]}>{isCloudSynced ? 'LIVE' : 'LOCAL'}</Text>
           </View>
+          <TouchableOpacity
+            style={styles.logoutBtn}
+            onPress={() => showAlert('Sign Out', 'Are you sure you want to sign out?', [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Sign Out', style: 'destructive', onPress: () => { logout(); router.replace('/login'); } },
+            ])}
+          >
+            <MaterialIcons name="logout" size={18} color={Colors.danger} />
+            <Text style={styles.logoutBtnText}>Logout</Text>
+          </TouchableOpacity>
         </View>
       </View>
 
       <View style={styles.body}>
-        <ScrollView style={styles.sectionNav} showsVerticalScrollIndicator={false}>
-          {SECTIONS.map(s => (
-            <TouchableOpacity key={s.key} style={[styles.sectionNavItem, activeSection === s.key && { backgroundColor: s.color + '18', borderColor: s.color + '50' }]} onPress={() => setActiveSection(s.key)}>
-              <View style={[styles.sectionNavIcon, { backgroundColor: activeSection === s.key ? s.color + '25' : Colors.navyLight }]}>
-                <MaterialIcons name={s.icon as any} size={18} color={activeSection === s.key ? s.color : Colors.textMuted} />
-              </View>
-              <Text style={[styles.sectionNavLabel, activeSection === s.key && { color: s.color, fontWeight: Typography.bold }]}>{s.label}</Text>
-              <MaterialIcons name="chevron-right" size={16} color={activeSection === s.key ? s.color : Colors.textMuted} />
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
+        {isDesktop ? (
+          <ScrollView style={styles.sectionNav} showsVerticalScrollIndicator={false}>
+            {SECTIONS.map(s => (
+              <TouchableOpacity key={s.key} style={[styles.sectionNavItem, activeSection === s.key && { backgroundColor: s.color + '18', borderColor: s.color + '50' }]} onPress={() => setActiveSection(s.key)}>
+                <View style={[styles.sectionNavIcon, { backgroundColor: activeSection === s.key ? s.color + '25' : Colors.navyLight }]}>
+                  <MaterialIcons name={s.icon as any} size={18} color={activeSection === s.key ? s.color : Colors.textMuted} />
+                </View>
+                <Text style={[styles.sectionNavLabel, activeSection === s.key && { color: s.color, fontWeight: Typography.bold }]}>{s.label}</Text>
+                <MaterialIcons name="chevron-right" size={16} color={activeSection === s.key ? s.color : Colors.textMuted} />
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
+        ) : (
+          <View style={styles.sectionNav}>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ flexDirection: 'row', paddingHorizontal: Spacing.sm, paddingVertical: 6, gap: 4, alignItems: 'center' }}>
+              {SECTIONS.map(s => (
+                <TouchableOpacity key={s.key} style={[styles.sectionNavItem, activeSection === s.key && { backgroundColor: s.color + '18', borderColor: s.color + '50', borderWidth: 1 }]} onPress={() => setActiveSection(s.key)}>
+                  <View style={[styles.sectionNavIcon, { backgroundColor: activeSection === s.key ? s.color + '25' : Colors.navyLight }]}>
+                    <MaterialIcons name={s.icon as any} size={15} color={activeSection === s.key ? s.color : Colors.textMuted} />
+                  </View>
+                  {activeSection === s.key && (
+                    <Text style={[styles.sectionNavLabel, { color: s.color, fontWeight: Typography.bold }]}>{s.label}</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        )}
 
         <ScrollView style={styles.sectionContent} showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 60 }}>
           {activeSection === 'store'   && renderStore()}
@@ -998,11 +1028,13 @@ const styles = StyleSheet.create({
   syncIndicator: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: BorderRadius.circle, borderWidth: 1 },
   syncIndicatorDot: { width: 6, height: 6, borderRadius: 3 },
   syncIndicatorText: { fontSize: 10, fontWeight: Typography.bold, letterSpacing: 0.5 },
-  body: { flex: 1, flexDirection: 'row' },
-  sectionNav: { width: 160, backgroundColor: Colors.navyMid, borderRightWidth: 1, borderRightColor: Colors.borderGold, paddingVertical: Spacing.md, paddingHorizontal: Spacing.sm },
-  sectionNavItem: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 10, paddingVertical: 10, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: 'transparent', marginBottom: 3 },
-  sectionNavIcon: { width: 32, height: 32, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
-  sectionNavLabel: { flex: 1, fontSize: 11, color: Colors.textSecondary, fontWeight: Typography.medium },
+  body: { flex: 1, flexDirection: isDesktop ? 'row' : 'column' },
+  sectionNav: { width: isDesktop ? 160 : '100%', maxHeight: isDesktop ? undefined : 52, backgroundColor: Colors.navyMid, borderRightWidth: isDesktop ? 1 : 0, borderRightColor: Colors.borderGold, borderBottomWidth: isDesktop ? 0 : 1, borderBottomColor: Colors.borderGold, paddingVertical: isDesktop ? Spacing.md : 0, paddingHorizontal: isDesktop ? Spacing.sm : 0 },
+  sectionNavItem: { flexDirection: 'row', alignItems: 'center', gap: isDesktop ? 8 : 4, paddingHorizontal: isDesktop ? 10 : 8, paddingVertical: isDesktop ? 10 : 13, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: 'transparent', marginBottom: isDesktop ? 3 : 0, marginRight: isDesktop ? 0 : 2 },
+  sectionNavIcon: { width: 28, height: 28, borderRadius: 8, alignItems: 'center', justifyContent: 'center' },
+  sectionNavLabel: { flex: isDesktop ? 1 : undefined, fontSize: isDesktop ? 11 : 10, color: Colors.textSecondary, fontWeight: Typography.medium },
+  logoutBtn: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.dangerMuted, paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.danger + '30' },
+  logoutBtnText: { fontSize: 12, fontWeight: Typography.semibold, color: Colors.danger },
   sectionContent: { flex: 1 },
   sectionBody: { padding: Spacing.base, gap: Spacing.md },
   sectionIntro: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyCard, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, paddingHorizontal: Spacing.md, paddingVertical: 10 },

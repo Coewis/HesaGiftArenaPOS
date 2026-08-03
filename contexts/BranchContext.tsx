@@ -10,14 +10,20 @@ export interface Branch {
   icon: string;
 }
 
+export const STORE_CONTACT = {
+  phone: '0748152333',
+  email: 'hesagiftarena@protonmail.com',
+  website: 'hesagiftarena.lovable.app',
+};
+
 export const BRANCHES: Branch[] = [
   {
     id: 'branch_main',
     name: 'Main Branch',
     shortName: 'Main',
     address: 'Plot 14, Kampala Road, Kampala',
-    phone: '+256 700 000 001',
-    color: '#D4AF37',
+    phone: '0748152333',
+    color: '#38B6FF',
     icon: 'store',
   },
   {
@@ -25,8 +31,8 @@ export const BRANCHES: Branch[] = [
     name: 'Kasese Branch',
     shortName: 'Kasese',
     address: 'Kasese Town, Western Uganda',
-    phone: '+256 700 000 002',
-    color: '#38B6FF',
+    phone: '0748152333',
+    color: '#22C55E',
     icon: 'storefront',
   },
   {
@@ -34,8 +40,8 @@ export const BRANCHES: Branch[] = [
     name: 'Fort Portal Branch',
     shortName: 'Fort Portal',
     address: 'Fort Portal City, Kabarole',
-    phone: '+256 700 000 003',
-    color: '#2ECC71',
+    phone: '0748152333',
+    color: '#F59E0B',
     icon: 'local-florist',
   },
   {
@@ -43,7 +49,7 @@ export const BRANCHES: Branch[] = [
     name: 'Mukono Branch',
     shortName: 'Mukono',
     address: 'Mukono Town, Mukono District',
-    phone: '+256 700 000 004',
+    phone: '0748152333',
     color: '#E67E22',
     icon: 'location-city',
   },
@@ -52,7 +58,7 @@ export const BRANCHES: Branch[] = [
     name: 'Ibanda Branch',
     shortName: 'Ibanda',
     address: 'Ibanda Town, Ibanda District',
-    phone: '+256 700 000 005',
+    phone: '0748152333',
     color: '#9B59B6',
     icon: 'business',
   },

@@ -101,7 +101,32 @@ interface RiderEarning {
 }
 
 type DeliveryStatus = 'assigned' | 'accepted' | 'picked_up' | 'in_transit' | 'delivered' | 'failed';
-type TabMode = 'deliveries' | 'riders' | 'earnings' | 'tracking';
+type TabMode = 'deliveries' | 'riders' | 'earnings' | 'tracking' | 'performance';
+
+interface RiderRating {
+  id: string;
+  rider_id: string;
+  delivery_id: string;
+  order_id: string;
+  rating: number;
+  notes?: string;
+  rated_by: string;
+  rated_by_role: string;
+  created_at: string;
+}
+
+interface RiderPerformance {
+  rider: Rider;
+  totalDeliveries: number;
+  successful: number;
+  failed: number;
+  successRate: number;
+  avgDeliveryMinutes: number;
+  totalEarnings: number;
+  avgRating: number;
+  ratingCount: number;
+  ratings: RiderRating[];
+}
 
 const STATUS_CONFIG: Record<DeliveryStatus, { label: string; color: string; icon: string }> = {
   assigned:   { label: 'Assigned',    color: Colors.skyBlue,   icon: 'assignment-ind' },
@@ -163,6 +188,16 @@ export default function RidersScreen() {
   const locationPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mapRef = useRef<any>(null);
 
+  // Performance & Ratings state
+  const [riderRatings, setRiderRatings] = useState<RiderRating[]>([]);
+  const [ratingsLoading, setRatingsLoading] = useState(false);
+  const [perfMonth, setPerfMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [showRatingModal, setShowRatingModal] = useState(false);
+  const [ratingDelivery, setRatingDelivery] = useState<RiderDelivery | null>(null);
+  const [ratingValue, setRatingValue] = useState(5);
+  const [ratingNotes, setRatingNotes] = useState('');
+  const [savingRating, setSavingRating] = useState(false);
+
   const [showDeliveryDetail, setShowDeliveryDetail] = useState<RiderDelivery | null>(null);
   const [showOTPVerify, setShowOTPVerify] = useState(false);
   const [otpInput, setOtpInput] = useState('');
@@ -205,6 +240,7 @@ export default function RidersScreen() {
 
   useEffect(() => { loadData(); }, []);
   useEffect(() => { if (tabMode === 'earnings') loadEarnings(); }, [tabMode, earningsMonth]);
+  useEffect(() => { if (tabMode === 'performance') loadRiderRatings(); }, [tabMode, perfMonth]);
 
   // Poll rider locations every 30 seconds when tracking tab is active
   useEffect(() => {
@@ -216,6 +252,47 @@ export default function RidersScreen() {
     }
     return () => { if (locationPollRef.current) clearInterval(locationPollRef.current); };
   }, [tabMode]);
+
+  const loadRiderRatings = useCallback(async () => {
+    setRatingsLoading(true);
+    try {
+      const monthStart = perfMonth + '-01';
+      const monthEnd = perfMonth + '-31';
+      const { data } = await db.from('pos_rider_ratings')
+        .select('*')
+        .gte('created_at', monthStart)
+        .lte('created_at', monthEnd)
+        .order('created_at', { ascending: false });
+      if (data) setRiderRatings(data);
+    } catch {}
+    finally { setRatingsLoading(false); }
+  }, [perfMonth]);
+
+  const handleSaveRating = async () => {
+    if (!ratingDelivery || !user) return;
+    setSavingRating(true);
+    try {
+      const id = `rating_${Date.now()}`;
+      const rating: RiderRating = {
+        id,
+        rider_id: ratingDelivery.rider_id,
+        delivery_id: ratingDelivery.id,
+        order_id: ratingDelivery.order_id,
+        rating: ratingValue,
+        notes: ratingNotes.trim() || undefined,
+        rated_by: user.name || 'Manager',
+        rated_by_role: user.role || 'Manager',
+        created_at: new Date().toISOString(),
+      };
+      await db.from('pos_rider_ratings').insert(rating);
+      setRiderRatings(prev => [rating, ...prev]);
+      setShowRatingModal(false);
+      setRatingNotes('');
+      setRatingValue(5);
+      showAlert('Rating Saved', `${ratingDelivery.rider_name} rated ${ratingValue}/5 stars.`);
+    } catch { showAlert('Error', 'Could not save rating.'); }
+    finally { setSavingRating(false); }
+  };
 
   const loadRiderLocations = useCallback(async () => {
     setLoadingLocations(true);
@@ -236,6 +313,60 @@ export default function RidersScreen() {
     if (riderFilter !== 'all') list = list.filter(d => d.rider_id === riderFilter);
     return list;
   }, [deliveries, statusFilter, riderFilter]);
+
+  const riderPerformance = useMemo((): RiderPerformance[] => {
+    return riders.filter(r => r.status === 'active').map(rider => {
+      const monthStart = perfMonth + '-01';
+      const monthEnd = perfMonth + '-31';
+      const monthDeliveries = deliveries.filter(d =>
+        d.rider_id === rider.id &&
+        d.assigned_at >= monthStart &&
+        d.assigned_at <= monthEnd
+      );
+      const successful = monthDeliveries.filter(d => d.status === 'delivered').length;
+      const failed = monthDeliveries.filter(d => d.status === 'failed').length;
+      const total = monthDeliveries.length;
+
+      // Average delivery time (assigned → delivered) in minutes
+      const completedWithTimes = monthDeliveries.filter(d => d.status === 'delivered' && d.delivered_at);
+      const avgMins = completedWithTimes.length > 0
+        ? completedWithTimes.reduce((sum, d) => {
+            const diff = (new Date(d.delivered_at!).getTime() - new Date(d.assigned_at).getTime()) / 60000;
+            return sum + diff;
+          }, 0) / completedWithTimes.length
+        : 0;
+
+      // Earnings for the month
+      const riderEarningsMonth = earnings.filter(e =>
+        e.rider_id === rider.id &&
+        e.period_month === perfMonth
+      );
+      const totalEarnings = riderEarningsMonth.reduce((s, e) =>
+        e.type === 'deduction' ? s - e.amount : s + e.amount, 0);
+
+      // Ratings
+      const myRatings = riderRatings.filter(r => r.rider_id === rider.id);
+      const avgRating = myRatings.length > 0
+        ? myRatings.reduce((s, r) => s + r.rating, 0) / myRatings.length
+        : 0;
+
+      return {
+        rider,
+        totalDeliveries: total,
+        successful,
+        failed,
+        successRate: total > 0 ? Math.round((successful / total) * 100) : 0,
+        avgDeliveryMinutes: Math.round(avgMins),
+        totalEarnings,
+        avgRating,
+        ratingCount: myRatings.length,
+        ratings: myRatings.slice(0, 5),
+      };
+    }).sort((a, b) => b.successRate - a.successRate || b.totalDeliveries - a.totalDeliveries);
+  }, [riders, deliveries, earnings, riderRatings, perfMonth]);
+
+  const deliveredThisMonth = useMemo(() =>
+    deliveries.filter(d => d.status === 'delivered' && d.assigned_at.startsWith(perfMonth)), [deliveries, perfMonth]);
 
   const earningsByRider = useMemo(() => {
     const map: Record<string, { name: string; total: number; count: number }> = {};
@@ -512,6 +643,7 @@ ${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.
           { key: 'riders', label: 'Riders', icon: 'two-wheeler' },
           { key: 'earnings', label: 'Earnings', icon: 'payments' },
           { key: 'tracking', label: 'Live Map', icon: 'map' },
+          { key: 'performance', label: 'Performance', icon: 'insights' },
         ] as { key: TabMode; label: string; icon: string }[]).map(t => (
           <TouchableOpacity key={t.key} style={[styles.tabBtn, tabMode === t.key && styles.tabBtnActive]} onPress={() => setTabMode(t.key)}>
             <MaterialIcons name={t.icon as any} size={15} color={tabMode === t.key ? Colors.navy : Colors.textMuted} />
@@ -938,6 +1070,207 @@ ${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.
         </ScrollView>
       )}
 
+      {/* ── PERFORMANCE TAB ─────────────────────────────────────────────────── */}
+      {tabMode === 'performance' && (
+        <ScrollView contentContainerStyle={styles.listContent} showsVerticalScrollIndicator={false}>
+          {/* Month Selector */}
+          <View style={styles.monthPickerRow}>
+            <TouchableOpacity style={styles.monthBtn} onPress={() => {
+              const d = new Date(perfMonth + '-01');
+              d.setMonth(d.getMonth() - 1);
+              setPerfMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-left" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <Text style={styles.monthLabel}>{new Date(perfMonth + '-01').toLocaleDateString('en-UG', { year: 'numeric', month: 'long' })}</Text>
+            <TouchableOpacity style={styles.monthBtn} onPress={() => {
+              const d = new Date(perfMonth + '-01');
+              d.setMonth(d.getMonth() + 1);
+              setPerfMonth(d.toISOString().slice(0, 7));
+            }}>
+              <MaterialIcons name="chevron-right" size={22} color={Colors.gold} />
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.shareReportBtn} onPress={loadRiderRatings} disabled={ratingsLoading}>
+              {ratingsLoading ? <ActivityIndicator size="small" color={Colors.navy} /> : <MaterialIcons name="refresh" size={15} color={Colors.navy} />}
+              <Text style={styles.shareReportBtnText}>Refresh</Text>
+            </TouchableOpacity>
+          </View>
+
+          {/* Month Overview Cards */}
+          <View style={[styles.earningsSummary, { marginBottom: 4 }]}>
+            {[
+              { label: 'Total Deliveries', value: String(riderPerformance.reduce((s, r) => s + r.totalDeliveries, 0)), color: Colors.skyBlue },
+              { label: 'Success Rate', value: riderPerformance.length > 0 ? `${Math.round(riderPerformance.reduce((s, r) => s + r.successRate, 0) / riderPerformance.length)}%` : '—', color: Colors.success },
+              { label: 'Avg Rating', value: riderRatings.length > 0 ? `${(riderRatings.reduce((s, r) => s + r.rating, 0) / riderRatings.length).toFixed(1)}★` : '—', color: Colors.gold },
+            ].map(k => (
+              <View key={k.label} style={[styles.earningSummaryCard, { borderColor: k.color + '30' }]}>
+                <Text style={[styles.earningSummaryValue, { color: k.color }]}>{k.value}</Text>
+                <Text style={styles.earningSummaryLabel}>{k.label}</Text>
+              </View>
+            ))}
+          </View>
+
+          {/* Rate a Delivery CTA */}
+          {deliveredThisMonth.length > 0 && (user?.role === 'Manager' || user?.role === 'Super Admin') && (
+            <TouchableOpacity
+              style={styles.rateDeliveryCTA}
+              onPress={() => { setRatingDelivery(deliveredThisMonth[0]); setRatingValue(5); setRatingNotes(''); setShowRatingModal(true); }}
+            >
+              <MaterialIcons name="star" size={18} color={Colors.gold} />
+              <View style={{ flex: 1 }}>
+                <Text style={styles.rateDeliveryCTATitle}>Rate a Completed Delivery</Text>
+                <Text style={styles.rateDeliveryCTASub}>{deliveredThisMonth.length} completed deliveries this month</Text>
+              </View>
+              <MaterialIcons name="chevron-right" size={16} color={Colors.gold} />
+            </TouchableOpacity>
+          )}
+
+          {/* Per-Rider Performance Cards */}
+          {riderPerformance.length === 0 ? (
+            <View style={styles.centered}>
+              <MaterialIcons name="insights" size={56} color={Colors.textMuted} />
+              <Text style={styles.emptyText}>No performance data yet</Text>
+              <Text style={styles.emptySubText}>Performance metrics appear after deliveries are completed</Text>
+            </View>
+          ) : riderPerformance.map((perf, idx) => (
+            <View key={perf.rider.id} style={styles.perfCard}>
+              {/* Card Header */}
+              <View style={styles.perfCardHeader}>
+                <View style={[styles.riderAvatar, { backgroundColor: Colors.gold + '20' }]}>
+                  <Text style={[styles.riderAvatarText, { color: Colors.gold }]}>
+                    {perf.rider.name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase()}
+                  </Text>
+                </View>
+                <View style={{ flex: 1 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                    <Text style={styles.perfRiderName}>{perf.rider.name}</Text>
+                    {idx === 0 && perf.totalDeliveries > 0 && (
+                      <View style={styles.topPerformerBadge}>
+                        <MaterialIcons name="emoji-events" size={10} color={Colors.navy} />
+                        <Text style={styles.topPerformerText}>Top</Text>
+                      </View>
+                    )}
+                  </View>
+                  <Text style={styles.perfRiderPhone}>{perf.rider.phone}</Text>
+                </View>
+                {/* Star Rating Display */}
+                <View style={styles.perfStarRow}>
+                  {[1, 2, 3, 4, 5].map(star => (
+                    <MaterialIcons
+                      key={star}
+                      name={star <= Math.round(perf.avgRating) ? 'star' : 'star-border'}
+                      size={16}
+                      color={Colors.gold}
+                    />
+                  ))}
+                </View>
+              </View>
+
+              {/* Metrics Grid */}
+              <View style={styles.perfMetricsGrid}>
+                <View style={styles.perfMetric}>
+                  <Text style={[styles.perfMetricValue, { color: Colors.skyBlue }]}>{perf.totalDeliveries}</Text>
+                  <Text style={styles.perfMetricLabel}>Deliveries</Text>
+                </View>
+                <View style={[styles.perfMetricDivider]} />
+                <View style={styles.perfMetric}>
+                  <Text style={[styles.perfMetricValue, { color: Colors.success }]}>{perf.successful}</Text>
+                  <Text style={styles.perfMetricLabel}>Successful</Text>
+                </View>
+                <View style={styles.perfMetricDivider} />
+                <View style={styles.perfMetric}>
+                  <Text style={[styles.perfMetricValue, { color: Colors.danger }]}>{perf.failed}</Text>
+                  <Text style={styles.perfMetricLabel}>Failed</Text>
+                </View>
+                <View style={styles.perfMetricDivider} />
+                <View style={styles.perfMetric}>
+                  <Text style={[styles.perfMetricValue, { color: perf.successRate >= 80 ? Colors.success : perf.successRate >= 50 ? Colors.warning : Colors.danger }]}>
+                    {perf.successRate}%
+                  </Text>
+                  <Text style={styles.perfMetricLabel}>Rate</Text>
+                </View>
+              </View>
+
+              {/* Progress Bar — Success Rate */}
+              <View style={{ gap: 4 }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                  <Text style={styles.perfBarLabel}>Success Rate</Text>
+                  <Text style={[styles.perfBarLabel, { color: perf.successRate >= 80 ? Colors.success : Colors.warning }]}>{perf.successRate}%</Text>
+                </View>
+                <View style={styles.perfProgressBg}>
+                  <View style={[styles.perfProgressFill, {
+                    width: `${perf.successRate}%`,
+                    backgroundColor: perf.successRate >= 80 ? Colors.success : perf.successRate >= 50 ? Colors.warning : Colors.danger,
+                  }]} />
+                </View>
+              </View>
+
+              {/* Delivery Time + Earnings + Rating */}
+              <View style={styles.perfExtraRow}>
+                <View style={styles.perfExtraChip}>
+                  <MaterialIcons name="schedule" size={12} color={Colors.textMuted} />
+                  <Text style={styles.perfExtraText}>
+                    {perf.avgDeliveryMinutes > 0
+                      ? perf.avgDeliveryMinutes >= 60
+                        ? `${Math.floor(perf.avgDeliveryMinutes / 60)}h ${perf.avgDeliveryMinutes % 60}m avg`
+                        : `${perf.avgDeliveryMinutes}m avg delivery`
+                      : 'No data'}
+                  </Text>
+                </View>
+                <View style={styles.perfExtraChip}>
+                  <MaterialIcons name="payments" size={12} color={Colors.gold} />
+                  <Text style={[styles.perfExtraText, { color: Colors.gold }]}>{formatUGX(perf.totalEarnings)}</Text>
+                </View>
+                <View style={styles.perfExtraChip}>
+                  <MaterialIcons name="star" size={12} color={Colors.gold} />
+                  <Text style={styles.perfExtraText}>
+                    {perf.ratingCount > 0 ? `${perf.avgRating.toFixed(1)} (${perf.ratingCount})` : 'Not rated'}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Recent Ratings */}
+              {perf.ratings.length > 0 && (
+                <View style={styles.recentRatingsSection}>
+                  <Text style={styles.recentRatingsTitle}>Recent Ratings</Text>
+                  {perf.ratings.map(r => (
+                    <View key={r.id} style={styles.recentRatingRow}>
+                      <View style={{ flexDirection: 'row', gap: 2 }}>
+                        {[1, 2, 3, 4, 5].map(s => (
+                          <MaterialIcons key={s} name={s <= r.rating ? 'star' : 'star-border'} size={13} color={Colors.gold} />
+                        ))}
+                      </View>
+                      <Text style={styles.recentRatingBy} numberOfLines={1}>
+                        {r.notes || `Rated by ${r.rated_by}`}
+                      </Text>
+                      <Text style={styles.recentRatingDate}>{new Date(r.created_at).toLocaleDateString('en-UG', { month: 'short', day: 'numeric' })}</Text>
+                    </View>
+                  ))}
+                </View>
+              )}
+
+              {/* Rate Button */}
+              {(user?.role === 'Manager' || user?.role === 'Super Admin') && (
+                <TouchableOpacity
+                  style={styles.rateRiderBtn}
+                  onPress={() => {
+                    const latestDelivery = deliveredThisMonth.find(d => d.rider_id === perf.rider.id);
+                    if (!latestDelivery) { showAlert('No Deliveries', 'No completed deliveries this month to rate.'); return; }
+                    setRatingDelivery(latestDelivery);
+                    setRatingValue(5);
+                    setRatingNotes('');
+                    setShowRatingModal(true);
+                  }}
+                >
+                  <MaterialIcons name="star" size={14} color={Colors.navy} />
+                  <Text style={styles.rateRiderBtnText}>Rate {perf.rider.name.split(' ')[0]}</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          ))}
+        </ScrollView>
+      )}
+
       {/* ── ASSIGN RIDER MODAL ────────────────────────────────────────────────── */}
       <Modal visible={showAssignModal} transparent animationType="slide">
         <View style={styles.modalOverlay}>
@@ -1185,6 +1518,74 @@ ${earningsByRider.map((r, i) => `<tr><td>${i + 1}</td><td>${r.name}</td><td>${r.
         </View>
       </Modal>
 
+      {/* ── RATING MODAL ─────────────────────────────────────────────────────── */}
+      <Modal visible={showRatingModal} transparent animationType="fade">
+        <View style={styles.modalOverlay}>
+          <View style={[styles.modal, { maxHeight: '70%' }]}>
+            <View style={styles.modalHeader}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                <MaterialIcons name="star" size={22} color={Colors.gold} />
+                <View>
+                  <Text style={styles.modalTitle}>Rate Delivery</Text>
+                  {ratingDelivery && <Text style={{ fontSize: Typography.xs, color: Colors.textMuted }}>{ratingDelivery.rider_name} · {ratingDelivery.order_no || ratingDelivery.order_id.slice(-6)}</Text>}
+                </View>
+              </View>
+              <TouchableOpacity onPress={() => setShowRatingModal(false)}><MaterialIcons name="close" size={20} color={Colors.textMuted} /></TouchableOpacity>
+            </View>
+            <View style={styles.modalBody}>
+              <Text style={styles.formLabel}>Star Rating *</Text>
+              {/* Big Star Selector */}
+              <View style={styles.bigStarRow}>
+                {[1, 2, 3, 4, 5].map(star => (
+                  <TouchableOpacity key={star} style={styles.bigStarBtn} onPress={() => setRatingValue(star)}>
+                    <MaterialIcons
+                      name={star <= ratingValue ? 'star' : 'star-border'}
+                      size={44}
+                      color={star <= ratingValue ? Colors.gold : Colors.textMuted}
+                    />
+                    <Text style={[styles.bigStarLabel, star <= ratingValue && { color: Colors.gold }]}>{star}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <View style={styles.ratingLabelRow}>
+                <Text style={styles.ratingLabelHint}>
+                  {ratingValue === 1 ? '😞 Poor' : ratingValue === 2 ? '😐 Below Average' : ratingValue === 3 ? '🙂 Average' : ratingValue === 4 ? '😊 Good' : '🌟 Excellent'}
+                </Text>
+              </View>
+              {/* Quick rating presets */}
+              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+                {[
+                  { label: 'On Time', stars: 5 }, { label: 'Slightly Late', stars: 4 },
+                  { label: 'Very Late', stars: 2 }, { label: 'Professional', stars: 5 },
+                  { label: 'Rude', stars: 1 }, { label: 'Good Communication', stars: 4 },
+                ].map(preset => (
+                  <TouchableOpacity key={preset.label} style={styles.ratingPresetChip} onPress={() => { setRatingValue(preset.stars); setRatingNotes(preset.label); }}>
+                    <Text style={styles.ratingPresetText}>{preset.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              <View style={styles.formGroup}>
+                <Text style={styles.formLabel}>Notes (optional)</Text>
+                <TextInput
+                  style={[styles.inputWrap, { height: 72, textAlignVertical: 'top', paddingVertical: 10, paddingHorizontal: 12 }]}
+                  placeholder="Any comments about this delivery..."
+                  placeholderTextColor={Colors.textMuted}
+                  value={ratingNotes}
+                  onChangeText={setRatingNotes}
+                  multiline
+                />
+              </View>
+            </View>
+            <View style={styles.modalFooter}>
+              <TouchableOpacity style={styles.cancelBtn} onPress={() => setShowRatingModal(false)}><Text style={styles.cancelBtnText}>Cancel</Text></TouchableOpacity>
+              <TouchableOpacity style={[styles.confirmBtn, savingRating && { opacity: 0.7 }]} onPress={handleSaveRating} disabled={savingRating}>
+                {savingRating ? <ActivityIndicator color={Colors.navy} size="small" /> : <><MaterialIcons name="star" size={16} color={Colors.navy} /><Text style={styles.confirmBtnText}>Save Rating</Text></>}
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
       {/* ── FAIL REASON MODAL ────────────────────────────────────────────────── */}
       <Modal visible={showFailModal} transparent animationType="fade">
         <View style={styles.modalOverlay}>
@@ -1317,6 +1718,43 @@ const styles = StyleSheet.create({
   earningLogDesc: { fontSize: 10, color: Colors.textMuted },
   earningLogAmount: { fontSize: Typography.sm, fontWeight: Typography.bold },
   // Map / Tracking
+  // Performance tab
+  perfCard: { backgroundColor: Colors.navyCard, borderRadius: BorderRadius.lg, borderWidth: 1, borderColor: Colors.border, padding: Spacing.md, gap: 12, ...Shadows.sm },
+  perfCardHeader: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  perfRiderName: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.textPrimary },
+  perfRiderPhone: { fontSize: Typography.xs, color: Colors.textMuted, marginTop: 1 },
+  perfStarRow: { flexDirection: 'row', alignItems: 'center', gap: 1 },
+  topPerformerBadge: { flexDirection: 'row', alignItems: 'center', gap: 3, backgroundColor: Colors.gold, paddingHorizontal: 6, paddingVertical: 2, borderRadius: BorderRadius.circle },
+  topPerformerText: { fontSize: 9, fontWeight: Typography.extrabold, color: Colors.navy },
+  perfMetricsGrid: { flexDirection: 'row', backgroundColor: Colors.navyLight, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.border, padding: 2 },
+  perfMetric: { flex: 1, alignItems: 'center', paddingVertical: 8, gap: 2 },
+  perfMetricDivider: { width: 1, backgroundColor: Colors.divider },
+  perfMetricValue: { fontSize: Typography.lg, fontWeight: Typography.extrabold },
+  perfMetricLabel: { fontSize: 9, color: Colors.textMuted, textTransform: 'uppercase', letterSpacing: 0.5 },
+  perfBarLabel: { fontSize: Typography.xs, color: Colors.textMuted },
+  perfProgressBg: { height: 8, backgroundColor: Colors.navyLight, borderRadius: 4, overflow: 'hidden' },
+  perfProgressFill: { height: '100%', borderRadius: 4 },
+  perfExtraRow: { flexDirection: 'row', gap: 6, flexWrap: 'wrap' },
+  perfExtraChip: { flexDirection: 'row', alignItems: 'center', gap: 5, backgroundColor: Colors.navyLight, borderRadius: BorderRadius.circle, paddingHorizontal: 10, paddingVertical: 5, borderWidth: 1, borderColor: Colors.border },
+  perfExtraText: { fontSize: 11, color: Colors.textSecondary, fontWeight: Typography.medium },
+  recentRatingsSection: { gap: 6 },
+  recentRatingsTitle: { fontSize: Typography.xs, color: Colors.textMuted, fontWeight: Typography.bold, textTransform: 'uppercase', letterSpacing: 0.5 },
+  recentRatingRow: { flexDirection: 'row', alignItems: 'center', gap: 8, backgroundColor: Colors.navyLight, borderRadius: BorderRadius.sm, padding: 8, borderWidth: 1, borderColor: Colors.border },
+  recentRatingBy: { flex: 1, fontSize: Typography.xs, color: Colors.textSecondary },
+  recentRatingDate: { fontSize: 10, color: Colors.textMuted },
+  rateRiderBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: Colors.goldMuted, borderRadius: BorderRadius.md, paddingVertical: 10, borderWidth: 1, borderColor: Colors.borderGold },
+  rateRiderBtnText: { fontSize: Typography.sm, fontWeight: Typography.bold, color: Colors.gold },
+  rateDeliveryCTA: { flexDirection: 'row', alignItems: 'center', gap: 10, backgroundColor: Colors.goldSubtle, borderRadius: BorderRadius.md, borderWidth: 1, borderColor: Colors.borderGold, paddingHorizontal: Spacing.md, paddingVertical: 12, marginBottom: 4 },
+  rateDeliveryCTATitle: { fontSize: Typography.sm, fontWeight: Typography.semibold, color: Colors.gold },
+  rateDeliveryCTASub: { fontSize: Typography.xs, color: Colors.textMuted },
+  // Rating modal
+  bigStarRow: { flexDirection: 'row', justifyContent: 'center', gap: 8, paddingVertical: 8 },
+  bigStarBtn: { alignItems: 'center', gap: 3 },
+  bigStarLabel: { fontSize: 11, color: Colors.textMuted, fontWeight: Typography.medium },
+  ratingLabelRow: { alignItems: 'center' },
+  ratingLabelHint: { fontSize: Typography.base, fontWeight: Typography.semibold, color: Colors.textSecondary },
+  ratingPresetChip: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: BorderRadius.circle, backgroundColor: Colors.navyCard, borderWidth: 1, borderColor: Colors.border },
+  ratingPresetText: { fontSize: 11, color: Colors.textMuted },
   mapFallback: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12, backgroundColor: Colors.navyCard, padding: 40 },
   mapFallbackText: { fontSize: Typography.base, fontWeight: Typography.bold, color: Colors.textMuted, textAlign: 'center' },
   mapFallbackSub: { fontSize: Typography.xs, color: Colors.textMuted, textAlign: 'center' },

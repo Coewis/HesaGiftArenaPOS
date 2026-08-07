@@ -1,9 +1,11 @@
-// app/(tabs)/inventory-movements.tsx
+// Updated inventory-movements.tsx to open MovementDetailModal on row press
+
 import React, { useState } from 'react';
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, ActivityIndicator, TextInput, Button } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import useStockMovements from '@/hooks/useStockMovements';
 import MovementRow from '@/components/MovementRow';
+import MovementDetailModal from '@/components/MovementDetailModal';
 import { exportMovementsCSV } from '@/services/inventoryService';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
@@ -15,6 +17,8 @@ export default function InventoryMovements() {
   const [filterTerm, setFilterTerm] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [selectedMovement, setSelectedMovement] = useState<string | undefined>(undefined);
+  const [detailVisible, setDetailVisible] = useState(false);
 
   const onExport = async () => {
     try {
@@ -26,6 +30,8 @@ export default function InventoryMovements() {
       else alert('Export saved: ' + path);
     } catch (err) { console.warn('export error', err); alert('Export failed'); }
   };
+
+  const openDetail = (id: string) => { setSelectedMovement(id); setDetailVisible(true); };
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}> 
@@ -47,22 +53,14 @@ export default function InventoryMovements() {
         <FlatList
           data={filterTerm ? items.filter(i => String(i.product_id).includes(filterTerm)) : items}
           keyExtractor={i => i.id}
-          renderItem={({ item }) => <MovementRow item={item} />}
+          renderItem={({ item }) => <MovementRow item={item} onPress={() => openDetail(item.id)} />}
           onEndReached={() => { if (hasMore) loadMore(); }}
           onEndReachedThreshold={0.4}
           ListFooterComponent={loading ? <ActivityIndicator /> : null}
         />
       )}
+
+      <MovementDetailModal visible={detailVisible} movementId={selectedMovement} onClose={() => { setDetailVisible(false); setSelectedMovement(undefined); }} />
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: Colors.background },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: 12 },
-  title: { fontSize: 20, fontWeight: '700' },
-  reloadBtn: { padding: 8, borderRadius: 8, borderWidth: 1, borderColor: '#ddd' },
-  exportBtn: { padding: 8, borderRadius: 8, backgroundColor: Colors.gold },
-  filters: { padding: 12, flexDirection: 'row', gap: 8, alignItems: 'center' },
-  input: { flex: 1, borderWidth: 1, borderColor: '#eee', borderRadius: 8, padding: 8, marginRight: 8 }
-});

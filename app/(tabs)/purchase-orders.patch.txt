@@ -1,0 +1,25 @@
+// app/(tabs)/purchase-orders.tsx
+// small patch: import POAuditList and POApprovalModal usage in PO Detail
+
+// Add to imports at top of file
+// import POApprovalModal from '@/components/POApprovalModal';
+// import POAuditList from '@/components/POAuditList';
+
+// Inside PO Detail modal render (after items list), include approval and audit list
+
+// Add state for approval modal
+// const [approvalModalVisible, setApprovalModalVisible] = useState(false);
+
+// Replace part of PO detail render to include approvals and audits
+
+/*
+  <View style={{ marginTop: 12 }}>
+    <TouchableOpacity style={[styles.receiveBtn, { backgroundColor: Colors.success }]} onPress={openReceiveModal}><Text style={{ color: '#fff' }}>Receive Goods</Text></TouchableOpacity>
+    <TouchableOpacity style={[styles.receiveBtn, { marginTop: 8, backgroundColor: Colors.warning }]} onPress={() => Alert.alert('Send PO', 'Mark PO as sent (not implemented)') }><Text>Mark Sent</Text></TouchableOpacity>
+    <TouchableOpacity style={[styles.receiveBtn, { marginTop: 8, backgroundColor: Colors.skyBlue }]} onPress={() => setApprovalModalVisible(true)}><Text style={{ color: '#fff' }}>Approve / Review</Text></TouchableOpacity>
+  </View>
+  <POAuditList poId={selectedPO.id} />
+  <POApprovalModal visible={approvalModalVisible} onClose={() => setApprovalModalVisible(false)} poId={selectedPO.id} userId={(await import('@/template')).getCurrentUserId ? (await import('@/template')).getCurrentUserId() : 'system'} onUpdated={() => { loadPOs(); }} />
+*/
+
+// Note: The above block needs to be inserted into the PO Detail modal body. This push only adds new components; if you want I can apply the in-file patch to insert the block programmatically.
